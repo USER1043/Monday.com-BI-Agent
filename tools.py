@@ -484,12 +484,12 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sector": {"type": "string", "description": "Filter by sector"},
-                    "stage": {"type": "string", "description": "Filter by deal stage"},
-                    "status": {"type": "string", "description": "Filter by deal status (defaults to 'Open' if not specified)"},
-                    "date_from": {"type": "string", "description": "Filter by tentative close date from (ISO format YYYY-MM-DD)"},
-                    "date_to": {"type": "string", "description": "Filter by tentative close date to (ISO format YYYY-MM-DD)"},
-                    "owner": {"type": "string", "description": "Filter by owner"}
+                    "sector": {"type": ["string", "null"], "description": "Filter by sector"},
+                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage"},
+                    "status": {"type": ["string", "null"], "description": "Filter by deal status (defaults to 'Open' if not specified)"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by tentative close date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by tentative close date to (ISO format YYYY-MM-DD)"},
+                    "owner": {"type": ["string", "null"], "description": "Filter by owner"}
                 }
             }
         }
@@ -502,11 +502,11 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sector": {"type": "string", "description": "Filter by sector"},
-                    "billing_status": {"type": "string", "description": "Filter by unified billing status"},
-                    "date_from": {"type": "string", "description": "Filter by invoice date from (ISO format YYYY-MM-DD)"},
-                    "date_to": {"type": "string", "description": "Filter by invoice date to (ISO format YYYY-MM-DD)"},
-                    "client": {"type": "string", "description": "Filter by client name or code"}
+                    "sector": {"type": ["string", "null"], "description": "Filter by sector"},
+                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by invoice date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by invoice date to (ISO format YYYY-MM-DD)"},
+                    "client": {"type": ["string", "null"], "description": "Filter by client name or code"}
                 }
             }
         }

@@ -175,7 +175,8 @@ class MondayMCPClient:
         try:
             result = await self.session.call_tool("get_board_info", {"boardId": int(board_id)})
             payload = self._extract_tool_payload(result)
-            return payload.get("columns", []) if isinstance(payload, dict) else []
+            board_data = payload.get("board", {}) if isinstance(payload, dict) else {}
+            return board_data.get("columns", []) if isinstance(board_data, dict) else []
         except Exception as e:
             print(f"Error getting board columns: {e}")
             raise RuntimeError(f"Unable to read schema for Monday board {board_id}") from e
@@ -226,7 +227,13 @@ class MondayMCPClient:
         """Map MCP column IDs to live board titles for the existing normalizer."""
         flattened = dict(item)
         column_values = item.get("column_values", item.get("columnValues", []))
-        if isinstance(column_values, list):
+        if isinstance(column_values, dict):
+            for col_id, col_value in column_values.items():
+                title = column_titles.get(str(col_id))
+                if title:
+                    # In dict format, col_value is directly the text/value
+                    flattened[title] = col_value
+        elif isinstance(column_values, list):
             for column_value in column_values:
                 if not isinstance(column_value, dict):
                     continue

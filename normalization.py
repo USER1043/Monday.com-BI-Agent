@@ -462,12 +462,12 @@ def normalize_work_orders_row(row: Dict[str, Any], row_id: str) -> Tuple[Dict[st
     
     # Normalize basic fields
     cleaned['work_order_number'] = normalize_text(
-        row.get('Work Order Number', row.get('work_order_number', ''))
+        row.get('Serial #', row.get('Work Order Number', row.get('work_order_number', '')))
     )
     cleaned['client_code'] = normalize_text(row.get('Client Code', row.get('client_code', '')))
     cleaned['sector'] = normalize_text(row.get('Sector', row.get('sector', '')))
-    cleaned['client_name'] = normalize_text(row.get('Client Name', row.get('client_name', '')))
-    cleaned['owner'] = normalize_text(row.get('Owner', row.get('owner', '')))
+    cleaned['client_name'] = normalize_text(row.get('Customer Name Code', row.get('Client Name', row.get('client_name', ''))))
+    cleaned['owner'] = normalize_text(row.get('BD/KAM Personnel code', row.get('Owner', row.get('owner', ''))))
     
     # Handle multi-select fields
     cleaned['type_of_work'] = normalize_multi_select(
@@ -489,14 +489,14 @@ def normalize_work_orders_row(row: Dict[str, Any], row_id: str) -> Tuple[Dict[st
         ))
     
     # Handle dates
-    cleaned['invoice_date'] = normalize_date(row.get('Invoice Date', row.get('invoice_date', '')))
+    cleaned['invoice_date'] = normalize_date(row.get('Last invoice date', row.get('Invoice Date', row.get('invoice_date', ''))))
     cleaned['work_order_date'] = normalize_date(
-        row.get('Work Order Date', row.get('work_order_date', ''))
+        row.get('Date of PO/LOI', row.get('Work Order Date', row.get('work_order_date', '')))
     )
     
     # Handle financial fields
-    amount_billed = normalize_currency(row.get('Amount to be billed', row.get('amount_to_billed', '')))
-    amount_receivable = normalize_currency(row.get('Amount Receivable', row.get('amount_receivable', '')))
+    amount_billed = normalize_currency(row.get('Amount to be billed in Rs. (Exl. of GST) (Masked)', row.get('Amount to be billed', row.get('amount_to_billed', ''))))
+    amount_receivable = normalize_currency(row.get('Amount Receivable (Masked)', row.get('Amount Receivable', row.get('amount_receivable', ''))))
     
     cleaned['amount_to_billed'] = amount_billed
     cleaned['amount_receivable'] = amount_receivable
