@@ -71,20 +71,9 @@ def main():
     # Initialize session state
     initialize_session_state()
     
-    # Test tool calling reliability on first run
+    # Mark tool calling as tested so it doesn't block anything, but don't run it
     if not st.session_state.tool_calling_tested:
-        with st.spinner("Testing agent tool-calling reliability..."):
-            try:
-                reliability_ok = test_tool_calling_reliability(st.session_state.agent)
-                st.session_state.tool_calling_tested = True
-                
-                if not reliability_ok:
-                    st.warning("Tool-calling reliability test had issues. This may be due to MCP connection issues. The agent will still function but may have limited capabilities.")
-                else:
-                    st.success("Agent ready!")
-            except Exception as e:
-                st.info(f"Tool-calling test skipped: {str(e)}. Agent is ready but may have limited data access.")
-                st.session_state.tool_calling_tested = True
+        st.session_state.tool_calling_tested = True
     
     # Display chat history
     for message in st.session_state.messages:
@@ -174,6 +163,18 @@ def main():
             org_settings._save_settings()
             st.session_state.org_settings = {}
             st.rerun()
+            
+        # Test agent reliability button
+        if st.button("Run Reliability Test"):
+            with st.spinner("Testing agent tool-calling reliability..."):
+                try:
+                    reliability_ok = test_tool_calling_reliability(st.session_state.agent)
+                    if not reliability_ok:
+                        st.sidebar.warning("Tool-calling reliability test had issues.")
+                    else:
+                        st.sidebar.success("Reliability test passed!")
+                except Exception as e:
+                    st.sidebar.error(f"Test failed: {str(e)}")
         
         st.divider()
         
