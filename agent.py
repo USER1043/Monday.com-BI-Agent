@@ -432,7 +432,7 @@ Work Orders Board:
                     model=self.model,
                     messages=messages,
                     tools=TOOL_DEFINITIONS,
-                    tool_choice="auto" if iteration == 1 else "none"
+                    tool_choice="auto"
                 )
                 
                 assistant_message = response.choices[0].message
