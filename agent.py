@@ -283,24 +283,25 @@ Work Orders Board:
         leadership_keywords = ["leadership update", "weekly update", "executive update", "management update"]
         return any(keyword in user_message.lower() for keyword in leadership_keywords)
     
-    def _format_tool_result(self, tool_name: str, result) -> str:
+    def _format_tool_result(self, tool_name: str, result: Dict[str, Any]) -> str:
         """Format tool result for inclusion in response."""
-        if not result.success:
-            return f"Error calling {tool_name}: {result.error}"
+        if not result.get("success"):
+            return f"Error calling {tool_name}: {result.get('error')}"
         
         output = f"Tool: {tool_name}\n"
         
-        if result.data:
-            if isinstance(result.data, list):
-                output += f"Returned {len(result.data)} records\n"
+        data = result.get("data")
+        if data:
+            if isinstance(data, list):
+                output += f"Returned {len(data)} records\n"
                 # Show first few records as preview
-                if len(result.data) > 0:
-                    output += f"Sample record: {json.dumps(result.data[0], indent=2, default=str)}\n"
+                if len(data) > 0:
+                    output += f"Sample record: {json.dumps(data[0], indent=2, default=str)}\n"
             else:
-                output += f"Data: {json.dumps(result.data, indent=2, default=str)}\n"
+                output += f"Data: {json.dumps(data, indent=2, default=str)}\n"
         
-        if result.quality_report:
-            qr = result.quality_report
+        qr = result.get("quality_report")
+        if qr:
             output += f"\nData Quality Report:\n"
             output += f"- Total rows: {qr.total_rows}\n"
             output += f"- Cleaned rows: {len(qr.cleaned_records)}\n"
@@ -310,10 +311,11 @@ Work Orders Board:
             if qr.anomalies:
                 output += f"- Sample anomalies:\n"
                 for anomaly in qr.anomalies[:3]:
-                    output += f"  * {anomaly.type.value}: {anomaly.detail}\n"
+                    output += f"  * {anomaly.type.value if hasattr(anomaly.type, 'value') else str(anomaly.type)}: {anomaly.detail}\n"
         
-        if result.metadata:
-            output += f"\nMetadata: {json.dumps(result.metadata, indent=2, default=str)}\n"
+        metadata = result.get("metadata")
+        if metadata:
+            output += f"\nMetadata: {json.dumps(metadata, indent=2, default=str)}\n"
         
         return output
     
@@ -464,7 +466,7 @@ Work Orders Board:
                         tool_results.append({
                             "tool_call_id": tool_call.id,
                             "role": "tool",
-                            "content": json.dumps(result, default=str)
+                            "content": self._format_tool_result(tool_name, result)
                         })
                     
                     # Add assistant message and tool results to conversation
