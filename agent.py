@@ -100,6 +100,7 @@ DOMAIN KNOWLEDGE:
 
 PIPELINE DEFAULTS:
 - "Pipeline value" defaults to active pipeline only: Deal Status = Open, valued by Masked Deal value, placed in-period by Tentative Close Date.
+- "Weighted pipeline value" should be calculated by multiplying the Masked Deal value by the `stage_probability` column (which is already provided in the data). Do not ask the user for probabilities.
 - Won and Dead deals are excluded from this default. On Hold deals are shown separately, not dropped.
 - Broader views (include Won/Dead/On Hold) are available on explicit request.
 
