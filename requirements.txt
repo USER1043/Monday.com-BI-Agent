@@ -1,0 +1,8 @@
+pandas
+openpyxl
+requests
+python-dotenv
+anthropic
+streamlit
+mcp
+openai
