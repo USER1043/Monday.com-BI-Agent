@@ -106,7 +106,7 @@ def apply_deals_filters(records: List[Dict[str, Any]], filters: DealFilters) -> 
     filtered = records
     
     if filters.sector:
-        filtered = [r for r in filtered if r.get('sector') == filters.sector]
+        filtered = [r for r in filtered if r.get('sector') and filters.sector.lower() in r.get('sector').lower()]
     
     if filters.stage:
         filtered = [r for r in filtered if r.get('deal_stage') == filters.stage]
@@ -140,14 +140,15 @@ def apply_work_orders_filters(records: List[Dict[str, Any]], filters: WorkOrderF
     filtered = records
     
     if filters.sector:
-        filtered = [r for r in filtered if r.get('sector') == filters.sector]
+        filtered = [r for r in filtered if r.get('sector') and filters.sector.lower() in r.get('sector').lower()]
     
     if filters.billing_status:
         filtered = [r for r in filtered if r.get('unified_billing_status') == filters.billing_status]
     
     if filters.client:
-        filtered = [r for r in filtered if r.get('client_name') == filters.client or 
-                   r.get('client_code') == filters.client]
+        filtered = [r for r in filtered if 
+                    (r.get('client_name') and filters.client.lower() in r.get('client_name').lower()) or 
+                    (r.get('client_code') and filters.client.lower() in r.get('client_code').lower())]
     
     if filters.date_from:
         date_from = datetime.strptime(filters.date_from, '%Y-%m-%d').date()
@@ -223,13 +224,24 @@ def get_deals(
         # Drop near-null columns to reduce context
         filtered_records = drop_null_columns(filtered_records)
         
+        # Calculate Aggregations for the LLM
+        total_value = sum(float(r.get('masked_deal_value') or 0) for r in filtered_records)
+        total_weighted = sum(
+            float(r.get('masked_deal_value') or 0) * float(r.get('stage_probability') or 0)
+            for r in filtered_records
+        )
+        
         return ToolResult(
             success=True,
             data=filtered_records,
             quality_report=quality_report,
             metadata={
                 "total_raw_records": len(raw_data),
-                "filtered_records": len(filtered_records),
+                "filtered_records_count": len(filtered_records),
+                "aggregations": {
+                    "total_masked_deal_value": total_value,
+                    "total_weighted_pipeline_value": total_weighted
+                },
                 "filters_applied": asdict(filters),
                 "materiality_threshold": MATERIALITY_THRESHOLD
             }
@@ -299,13 +311,21 @@ def get_work_orders(
         # Drop near-null columns to reduce context
         filtered_records = drop_null_columns(filtered_records)
         
+        # Calculate Aggregations for the LLM
+        total_billed = sum(float(r.get('amount_to_billed') or 0) for r in filtered_records)
+        total_receivable = sum(float(r.get('amount_receivable') or 0) for r in filtered_records)
+        
         return ToolResult(
             success=True,
             data=filtered_records,
             quality_report=quality_report,
             metadata={
                 "total_raw_records": len(raw_data),
-                "filtered_records": len(filtered_records),
+                "filtered_records_count": len(filtered_records),
+                "aggregations": {
+                    "total_amount_to_be_billed": total_billed,
+                    "total_amount_receivable": total_receivable
+                },
                 "filters_applied": asdict(filters),
                 "materiality_threshold": MATERIALITY_THRESHOLD
             }
@@ -317,6 +337,94 @@ def get_work_orders(
             data=[],
             error=str(e)
         )
+
+
+
+def get_deal_metrics(
+    sector: Optional[str] = None,
+    stage: Optional[str] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    owner: Optional[str] = None,
+    group_by: Optional[str] = None
+) -> ToolResult:
+    """
+    Get aggregated deal metrics (sums, counts) with optional filtering and grouping.
+    """
+    # Re-use get_deals logic but only return metrics
+    result = get_deals(sector, stage, status, date_from, date_to, owner)
+    if not result.success:
+        return result
+        
+    records = result.data
+    
+    def _calc(recs):
+        return {
+            "count": len(recs),
+            "total_masked_deal_value": sum(float(r.get('masked_deal_value') or 0) for r in recs),
+            "total_weighted_pipeline_value": sum(float(r.get('masked_deal_value') or 0) * float(r.get('stage_probability') or 0) for r in recs)
+        }
+        
+    if not group_by:
+        metrics = _calc(records)
+    else:
+        grouped = {}
+        for r in records:
+            val = r.get(group_by, "Unknown")
+            if val not in grouped:
+                grouped[val] = []
+            grouped[val].append(r)
+        metrics = {k: _calc(v) for k, v in grouped.items()}
+        
+    return ToolResult(
+        success=True,
+        data={"metrics": metrics},
+        quality_report=result.quality_report,
+        metadata={"filters_applied": result.metadata.get("filters_applied")}
+    )
+
+def get_work_order_metrics(
+    sector: Optional[str] = None,
+    billing_status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    client: Optional[str] = None,
+    group_by: Optional[str] = None
+) -> ToolResult:
+    """
+    Get aggregated work order metrics (sums, counts) with optional filtering and grouping.
+    """
+    result = get_work_orders(sector, billing_status, date_from, date_to, client)
+    if not result.success:
+        return result
+        
+    records = result.data
+    
+    def _calc(recs):
+        return {
+            "count": len(recs),
+            "total_amount_to_be_billed": sum(float(r.get('amount_to_billed') or 0) for r in recs),
+            "total_amount_receivable": sum(float(r.get('amount_receivable') or 0) for r in recs)
+        }
+        
+    if not group_by:
+        metrics = _calc(records)
+    else:
+        grouped = {}
+        for r in records:
+            val = r.get(group_by, "Unknown")
+            if val not in grouped:
+                grouped[val] = []
+            grouped[val].append(r)
+        metrics = {k: _calc(v) for k, v in grouped.items()}
+        
+    return ToolResult(
+        success=True,
+        data={"metrics": metrics},
+        quality_report=result.quality_report,
+        metadata={"filters_applied": result.metadata.get("filters_applied")}
+    )
 
 
 def get_data_quality_summary(board: str) -> ToolResult:
@@ -479,6 +587,43 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "get_deal_metrics",
+            "description": "Get aggregated mathematical metrics for deals (e.g. total value, weighted pipeline, counts). Supports filtering and optional grouping (e.g. group_by='sector'). Use this instead of get_deals when the user asks for sums, totals, or aggregates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": ["string", "null"], "description": "Filter by sector"},
+                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage"},
+                    "status": {"type": ["string", "null"], "description": "Filter by deal status (defaults to 'Open' if not specified)"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by tentative close date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by tentative close date to (ISO format YYYY-MM-DD)"},
+                    "owner": {"type": ["string", "null"], "description": "Filter by owner"},
+                    "group_by": {"type": ["string", "null"], "description": "Field to group results by (e.g., 'sector', 'deal_stage', 'owner')"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_work_order_metrics",
+            "description": "Get aggregated mathematical metrics for work orders (e.g. total amount to be billed, receivable, counts). Supports filtering and grouping.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": ["string", "null"], "description": "Filter by sector"},
+                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by invoice date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by invoice date to (ISO format YYYY-MM-DD)"},
+                    "client": {"type": ["string", "null"], "description": "Filter by client name or code"},
+                    "group_by": {"type": ["string", "null"], "description": "Field to group results by (e.g., 'sector', 'unified_billing_status')"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_deals",
             "description": "Get deals data with optional filters. Defaults to Open deals unless status is specified. Returns normalized records with data quality report.",
             "parameters": {
@@ -567,7 +712,9 @@ TOOL_DEFINITIONS = [
 # Tool mapping for the agent to call functions
 TOOL_FUNCTIONS = {
     "get_deals": get_deals,
+    "get_deal_metrics": get_deal_metrics,
     "get_work_orders": get_work_orders,
+    "get_work_order_metrics": get_work_order_metrics,
     "get_data_quality_summary": get_data_quality_summary,
     "get_org_settings": get_org_settings,
     "set_org_setting": set_org_setting,

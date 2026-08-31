@@ -403,7 +403,7 @@ def normalize_deals_row(row: Dict[str, Any], row_id: str) -> Tuple[Dict[str, Any
     # Normalize basic fields
     cleaned['deal_name'] = normalize_text(deal_name)
     cleaned['client_code'] = normalize_text(client_code)
-    cleaned['sector'] = normalize_text(row.get('Sector', row.get('sector', '')))
+    cleaned['sector'] = normalize_text(row.get('Sector/service', row.get('Sector', row.get('sector', ''))))
     cleaned['owner'] = normalize_text(row.get('Owner', row.get('owner', '')))
     
     # Handle dates

@@ -85,7 +85,7 @@ class GroqAgent:
 
 CORE BEHAVIORS:
 1. ALWAYS call the relevant tool for every new question involving deals or work orders. NEVER answer from a previous tool result, even if the question looks similar.
-2. Always surface anomalies and data-quality disclosures returned by tools. Never silently drop them from your answer.
+2. Communicate at an executive/founder level. Focus on business insights, total metrics, and actionable trends. Do not discuss raw data issues, null values, sparsity, or token limits unless explicitly asked.
 3. Ask exactly ONE concise, specific clarifying question when any query intent, scope, metric, filter, or date range is genuinely ambiguous and there is no stored convention that resolves it. Examples include an unknown sector, an unclear date range, or whether "pipeline" means value or count; these are examples, not an exhaustive list. Do not ask a clarification when a reasonable default is defined below: state that assumption and proceed instead. Do not call tools until the clarification is answered.
 4. Never claim a record-level relationship between Deals and Work Orders boards. They can only be compared by shared dimensions (sector, owner), not linked record-to-record.
 5. When discussing "this quarter" or similar relative periods, first check org settings for fiscal quarter convention. If not set, ask the user: "calendar quarter, or fiscal (if fiscal, which month does the FY start)?" Then persist the answer.
@@ -105,9 +105,7 @@ PIPELINE DEFAULTS:
 - Broader views (include Won/Dead/On Hold) are available on explicit request.
 
 DATA QUALITY HANDLING:
-- Tools return data quality reports with anomalies (status contradictions, invalid values, etc.)
-- Always mention these when relevant to the user's question
-- Materiality threshold: small data gaps (<10%) are footnoted; larger gaps get both confirmed figures and labeled estimates
+- Tools return data quality reports with anomalies. Do not expose these technical reports to the founder unless it drastically impacts the core metric being asked (e.g., if everything is empty). Keep the focus on the business numbers.
 
 QUARTER CONVENTION:
 - The first time a quarter-dependent query comes in, ask whether they use calendar quarters or fiscal quarters (and which month starts the fiscal year)
@@ -127,7 +125,13 @@ TOOLS AVAILABLE:
         prompt += """
 
 YOUR ROLE:
-You are a business intelligence assistant, not a general-purpose AI. Focus on helping the founders understand their sales pipeline, work order execution, and business health through data analysis. Be concise, direct, and always ground your answers in the actual data returned by the tools.
+You are a top-tier Business Intelligence executive assistant for the founders of Skylark Drones. Your answers must be concise, direct, confident, and heavily focused on the core numbers and business insights. 
+- Use the metrics tools (get_deal_metrics, get_work_order_metrics) to give precise totals instead of trying to sum rows yourself.
+- NEVER speak like a Data Scientist investigating a dataset. Do NOT mention "rows", "nulls", "sparsity", "API limits", or "tokens". 
+- STRICT RULE: NEVER mention internal tool names (e.g., 'get_deals', 'get_deal_metrics'). NEVER mention internal backend column names (e.g., 'masked_deal_value', 'stage_probability'). NEVER explain the mathematical formulas or queries used to get the data.
+- Do NOT create tables with "Notes" or "Comments" columns that expose how you processed the data. Just present the final business figures cleanly.
+- ESCAPE DOLLAR SIGNS: Because the UI renders markdown, you MUST escape dollar signs (e.g., write `\$21M` instead of `$21M`) to prevent the numbers from being rendered as broken LaTeX math equations.
+- Deliver your insights in a clean, professional, board-ready format.
 """
         
         return prompt
@@ -293,11 +297,39 @@ Work Orders Board:
         
         data = result.get("data")
         if data:
-            if isinstance(data, list):
+            if tool_name == "get_board_schemas" and isinstance(data, dict):
+                # Strip out bulky settings (labels, colors) from schema to save tokens
+                compact_schema = {}
+                for board, cols in data.items():
+                    if isinstance(cols, list):
+                        compact_schema[board] = [
+                            {"id": c.get("id"), "title": c.get("title"), "type": c.get("type")}
+                            for c in cols if isinstance(c, dict)
+                        ]
+                output += f"Data: {json.dumps(compact_schema, default=str)}\n"
+            elif isinstance(data, list):
                 output += f"Returned {len(data)} records\n"
-                # Show first few records as preview
                 if len(data) > 0:
-                    output += f"Sample record: {json.dumps(data[0], indent=2, default=str)}\n"
+                    import csv
+                    import io
+                    csv_out = io.StringIO()
+                    # Only include keys that have values to minimize tokens
+                    keys = set()
+                    for r in data:
+                        for k, v in r.items():
+                            if v is not None and str(v).strip() != "":
+                                keys.add(k)
+                    if keys:
+                        writer = csv.DictWriter(csv_out, fieldnames=list(keys), extrasaction='ignore')
+                        writer.writeheader()
+                        
+                        # Limit to 25 records to prevent Token Limit (413) errors
+                        max_records = 25
+                        writer.writerows(data[:max_records])
+                        
+                        output += f"Data (CSV format, showing first {min(len(data), max_records)} of {len(data)} records):\n{csv_out.getvalue()}\n"
+                        if len(data) > max_records:
+                            output += f"...(Truncated {len(data) - max_records} records to save tokens). Use the 'aggregations' metadata below for totals.\n"
             else:
                 output += f"Data: {json.dumps(data, indent=2, default=str)}\n"
         
@@ -501,14 +533,7 @@ Work Orders Board:
                         AgentMessage(role="assistant", content=final_content)
                     )
                     
-                    # Enhance response with data quality info if available
-                    if data_quality_info:
-                        quality_summary = "\n\nData Quality Notes:\n"
-                        for info in data_quality_info:
-                            if info["anomalies"] > 0 or info["excluded_count"] > 0:
-                                quality_summary += f"- {info['tool']}: {info['anomalies']} anomalies, {info['excluded_count']} rows excluded ({info['excluded_fraction']:.1%})\n"
-                        final_content += quality_summary
-                    
+
                     return AgentResponse(
                         content=final_content,
                         tool_calls_made=tool_calls_made,
