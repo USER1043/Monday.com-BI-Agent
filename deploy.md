@@ -68,7 +68,22 @@ WORK_ORDERS_BOARD_ID = "your_work_orders_board_id_here"
 
 # Groq API Configuration
 GROQ_API_KEY = "your_groq_api_key_here"
+
+# Data source: "auto" (default), "monday" or "excel"
+DATA_SOURCE = "auto"
 ```
+
+### Running without a paid Monday.com plan
+
+The agent reads board data through `data_source.py`:
+
+- `auto` (default): uses the Monday.com MCP when `MONDAY_API_TOKEN` is set, and falls back to
+  the Excel snapshots in `Data/` if the MCP read fails (retried after 10 minutes).
+- `monday`: Monday.com MCP only; errors are reported to the agent.
+- `excel`: Excel snapshots only; no Monday.com secrets required.
+
+Both sources go through the same normalizer and tools, so answers are identical for the same data.
+The sidebar shows which source served the last read.
 
 ## Step 4: Run Board Setup Script (One-time)
 

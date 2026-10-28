@@ -13,6 +13,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from agent import create_agent, test_tool_calling_reliability
 from tools import get_org_settings, set_org_setting, org_settings
+from data_source import get_status as get_data_source_status
 
 # Load environment variables from .env file
 load_dotenv(), org_settings
@@ -185,7 +186,18 @@ def main():
             st.text("✅ Monday.com API: Configured")
         else:
             st.text("❌ Monday.com API: Not configured")
-        
+
+        source_status = get_data_source_status()
+        source_labels = {
+            "monday_mcp": "Monday.com MCP (live)",
+            "excel_snapshot": "Excel snapshot (Data/)",
+        }
+        st.text(f"Data source mode: {source_status['mode']}")
+        if source_status["last_source"]:
+            st.text(f"Last read from: {source_labels[source_status['last_source']]}")
+        if source_status["fallback_reason"]:
+            st.caption(f"Fallback reason: {source_status['fallback_reason']}")
+
         groq_key = os.environ.get("GROQ_API_KEY")
         if groq_key:
             st.text("✅ Groq API: Configured")

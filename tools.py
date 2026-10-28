@@ -1,7 +1,7 @@
 """
 Purpose-Built Tools for Monday.com Business Intelligence Agent
 
-Wrappers around MCP + normalizer that expose business-logic tools to Claude.
+Wrappers around the data source (Monday.com MCP or Excel fallback) + normalizer that expose business-logic tools to Claude.
 Per BUILD_BRIEF.md Section 4:
 - get_deals(filters) — sector, stage, status, date range, owner
 - get_work_orders(filters) — sector, unified billing status, date range, client
@@ -24,7 +24,11 @@ from normalization import (
     DataQualityReport, AnomalyType, drop_null_columns,
     calculate_materiality_disclosure, MATERIALITY_THRESHOLD
 )
-from mcp_integration import sync_get_deals_data, sync_get_work_orders_data, sync_get_board_schemas
+from data_source import (
+    get_deals_data as sync_get_deals_data,
+    get_work_orders_data as sync_get_work_orders_data,
+    get_board_schemas as sync_get_board_schemas,
+)
 
 
 @dataclass
@@ -198,7 +202,7 @@ def get_deals(
             owner=owner
         )
         
-        # Get raw data from MCP
+        # Get raw data from Monday.com MCP (or the Excel fallback)
         raw_data = sync_get_deals_data()
         
         if not raw_data:
@@ -212,7 +216,7 @@ def get_deals(
                     anomalies=[],
                     total_rows=0
                 ),
-                metadata={"message": "No deals data available from MCP"}
+                metadata={"message": "No deals data available from the data source"}
             )
         
         # Normalize data
@@ -285,7 +289,7 @@ def get_work_orders(
             client=client
         )
         
-        # Get raw data from MCP
+        # Get raw data from Monday.com MCP (or the Excel fallback)
         raw_data = sync_get_work_orders_data()
         
         if not raw_data:
@@ -299,7 +303,7 @@ def get_work_orders(
                     anomalies=[],
                     total_rows=0
                 ),
-                metadata={"message": "No work orders data available from MCP"}
+                metadata={"message": "No work orders data available from the data source"}
             )
         
         # Normalize data
