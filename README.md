@@ -156,6 +156,16 @@ See [deploy.md](./deploy.md) for detailed deployment instructions to Streamlit C
 
 ## How to Test It
 
+### Automated Tests
+
+`tests/test_ground_truth.py` checks every deal and work-order tool figure (totals, counts, weighted pipeline, medians, each filter and grouping) against the same figure computed independently from the raw Excel files in `Data/` with pandas.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests                              # against the Excel snapshots (offline)
+TEST_DATA_SOURCE=monday python -m pytest tests      # against the live Monday.com MCP boards
+```
+
 ### Sample Questions to Try
 
 - "How's our pipeline looking for Agriculture this quarter?"
@@ -233,7 +243,7 @@ See [deploy.md](./deploy.md) for detailed deployment instructions to Streamlit C
 - Authoritative Deal ID / mapping table to link Deals and Work Orders at record level
 - More robust fuzzy-matching for sector/client name variants
 - Caching to reduce repeated MCP calls within a session
-- Automated tests for normalization layer logic
+- Unit tests for individual normalization functions (current tests check tool output end to end)
 - Hardened error handling for MCP connection failures
 - Richer leadership-update formatting (exportable to PDF/slides)
 - Support for additional query types and broader question coverage
