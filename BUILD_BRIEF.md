@@ -131,7 +131,7 @@ Each tool's docstring/schema should be explicit about units, field meanings, and
 
 ## 5. Agent Loop / System Prompt
 
-**Model:** Llama 3.3 70B via Groq (OpenAI-compatible tool-calling format, `https://api.groq.com/openai/v1`). Free tier: ~30 req/min, ~1,000 req/day, ~12K TPM, ~100K TPD — plenty for building/testing/demoing, but design the loop to avoid unnecessary round-trips per query (favor the composite tools in §4 over many small chained calls).
+**Model:** gpt-oss-120b via Groq (OpenAI-compatible tool-calling format, `https://api.groq.com/openai/v1`). Free tier: ~30 req/min, ~1,000 req/day, ~12K TPM, ~100K TPD — plenty for building/testing/demoing, but design the loop to avoid unnecessary round-trips per query (favor the composite tools in §4 over many small chained calls).
 
 **Test tool-calling reliability early — before building anything on top of it.** Open-source models are noticeably less disciplined than Claude at multi-step tool orchestration: they can emit malformed tool-call JSON, skip calling a tool and answer from a guess instead, or answer a new query using a stale prior tool result rather than re-invoking. Before writing the rest of the agent loop, run a handful of representative queries (including follow-up queries that change the filter) and confirm the model actually re-calls tools when it should. If it doesn't reliably do so, harden the system prompt with explicit, blunt instructions (e.g. "You MUST call the relevant tool for every new question involving deals or work orders — never answer from a previous tool result, even if the question looks similar") before moving on — don't assume prompt-level discipline transfers from how Claude behaves.
 

@@ -22,10 +22,10 @@ The agent features:
 
 ## Architecture and Tech Stack
 
-**Architecture**: Streamlit frontend → Groq API agent/tool-use loop using Llama 3.3 70B → normalization layer → Monday.com MCP server → Monday.com board
+**Architecture**: Streamlit frontend → Groq API agent/tool-use loop using gpt-oss-120b → normalization layer → Monday.com MCP server → Monday.com board
 
 - **Frontend**: Streamlit chat interface with session state persistence
-- **Orchestration**: Llama 3.3 70B via Groq API with OpenAI-compatible tool calling
+- **Orchestration**: gpt-oss-120b via Groq API with OpenAI-compatible tool calling
 - **Integration layer**: Monday.com official MCP server for board/item reads
 - **Data normalization layer**: Pure Python functions for deterministic data cleaning
 - **Hosting**: Streamlit Community Cloud (free tier)
@@ -100,7 +100,7 @@ This script:
 | MONDAY_API_TOKEN | Monday.com API token for board access | Yes |
 | DEALS_BOARD_ID | Board ID for Deals board (from setup script) | Yes |
 | WORK_ORDERS_BOARD_ID | Board ID for Work Orders board (from setup script) | Yes |
-| GROQ_API_KEY | Groq API key for Llama 3.3 70B access | Yes |
+| GROQ_API_KEY | Groq API key for gpt-oss-120b access | Yes |
 
 For local development, create a `.env` file based on `.env.example`. For Streamlit Cloud deployment, add these as secrets in the app settings.
 
@@ -199,7 +199,7 @@ See [deploy.md](./deploy.md) for detailed deployment instructions to Streamlit C
 **From Decision Log:**
 - No reliable record-level key exists between Deals and Work Orders boards
 - Stage-based fallback probability for weighted pipeline (always disclosed)
-- Open-source models (Llama 3.3) are less reliable at multi-step tool calling than Claude
+- Open-source models (gpt-oss-120b) are less reliable at multi-step tool calling than Claude
 - No automated distribution of leadership updates (chat output only)
 
 **Implementation Constraints:**

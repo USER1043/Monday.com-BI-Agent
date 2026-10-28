@@ -1,9 +1,9 @@
 """
 Agent Loop for Monday.com Business Intelligence Agent
 
-Orchestrates Llama 3.3 70B via Groq API with tool calling.
+Orchestrates gpt-oss-120b via Groq API with tool calling.
 Per BUILD_BRIEF.md Section 5:
-- Model: Llama 3.3 70B via Groq API
+- Model: gpt-oss-120b via Groq API
 - Test tool-calling reliability early
 - System prompt with domain vocabulary and behaviors
 - Quarter convention stateful behavior
@@ -56,7 +56,7 @@ class AgentResponse:
 
 
 class GroqAgent:
-    """Agent that uses Llama 3.3 70B via Groq API with tool calling."""
+    """Agent that uses gpt-oss-120b via Groq API with tool calling."""
     
     def __init__(self, api_key: str):
         if OpenAI is None:
