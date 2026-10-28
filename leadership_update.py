@@ -13,7 +13,8 @@ from typing import Dict, List, Any
 from datetime import datetime
 from tools import (
     get_deals, get_work_orders, get_data_quality_summary,
-    get_org_settings, ToolResult
+    get_org_settings, summarize_deal_values, ToolResult,
+    format_inr as _inr
 )
 
 
@@ -42,32 +43,30 @@ def generate_leadership_update() -> str:
             
             if deals:
                 # Calculate pipeline metrics
-                total_value = sum(d.get('masked_deal_value', 0) or 0 for d in deals)
-                weighted_value = sum(
-                    (d.get('masked_deal_value', 0) or 0) * (d.get('stage_probability', 0) or 0)
-                    for d in deals
-                )
+                summary = summarize_deal_values(deals)
+                total_value = summary['total_masked_deal_value']
+                weighted_value = summary['total_weighted_pipeline_value']
                 deal_count = len(deals)
                 
                 # Stage distribution
                 stage_dist = {}
                 for deal in deals:
-                    stage = deal.get('deal_stage', 'Unknown')
+                    stage = deal.get('deal_stage') or 'Unknown'
                     stage_dist[stage] = stage_dist.get(stage, 0) + 1
                 
                 markdown += f"**Total Open Deals:** {deal_count}\n\n"
-                markdown += f"**Total Pipeline Value:** ${total_value:,.2f}\n\n"
-                markdown += f"**Weighted Pipeline Value:** ${weighted_value:,.2f}\n\n"
+                markdown += f"**Total Pipeline Value:** {_inr(total_value)}\n\n"
+                markdown += f"**Weighted Pipeline Value:** {_inr(weighted_value)} "
+                markdown += f"({summary['weighted_pipeline_deal_count']} deals in stages A–F)\n\n"
                 
                 markdown += "**Pipeline by Stage:**\n\n"
                 for stage, count in sorted(stage_dist.items()):
                     markdown += f"- {stage}: {count} deals\n"
                 
                 # Check for fallback probability usage
-                fallback_count = sum(1 for d in deals if d.get('used_probability_fallback', False))
-                if fallback_count > 0:
-                    fallback_pct = (fallback_count / deal_count) * 100
-                    markdown += f"\n*Note: {fallback_count} deals ({fallback_pct:.1f}%) used stage-based probability fallback for weighted pipeline calculation.*\n"
+                fallback = summary['probability_fallback']
+                if fallback['count'] > 0:
+                    markdown += f"\n*Note: {fallback['count']} deals ({fallback['fraction']:.1%}) used stage-based probability fallback for weighted pipeline calculation.*\n"
             else:
                 markdown += "No open deals found in pipeline.\n"
         else:
@@ -80,7 +79,7 @@ def generate_leadership_update() -> str:
     # 2. Sector Performance
     markdown += "## 🎯 Sector Performance\n\n"
     try:
-        all_deals_result = get_deals()
+        all_deals_result = get_deals(status="All")
         if all_deals_result.success:
             all_deals = all_deals_result.data
             
@@ -88,12 +87,13 @@ def generate_leadership_update() -> str:
                 # Calculate sector metrics
                 sector_metrics = {}
                 for deal in all_deals:
-                    sector = deal.get('sector', 'Unknown')
+                    sector = deal.get('sector') or 'Unknown'
                     if sector not in sector_metrics:
                         sector_metrics[sector] = {
                             'total_deals': 0,
                             'open_deals': 0,
                             'won_deals': 0,
+                            'dead_deals': 0,
                             'total_value': 0,
                             'won_value': 0
                         }
@@ -108,16 +108,19 @@ def generate_leadership_update() -> str:
                     elif status == 'won':
                         sector_metrics[sector]['won_deals'] += 1
                         sector_metrics[sector]['won_value'] += value
+                    elif status == 'dead':
+                        sector_metrics[sector]['dead_deals'] += 1
                 
                 markdown += "**Performance by Sector:**\n\n"
-                for sector, metrics in sorted(sector_metrics.items()):
-                    win_rate = (metrics['won_deals'] / metrics['total_deals'] * 100) if metrics['total_deals'] > 0 else 0
+                for sector, metrics in sorted(sector_metrics.items(), key=lambda item: str(item[0])):
+                    closed_deals = metrics['won_deals'] + metrics['dead_deals']
+                    win_rate = (metrics['won_deals'] / closed_deals * 100) if closed_deals > 0 else 0
                     markdown += f"### {sector}\n"
                     markdown += f"- Total Deals: {metrics['total_deals']}\n"
-                    markdown += f"- Open: {metrics['open_deals']} | Won: {metrics['won_deals']}\n"
-                    markdown += f"- Win Rate: {win_rate:.1f}%\n"
-                    markdown += f"- Total Value: ${metrics['total_value']:,.2f}\n"
-                    markdown += f"- Won Value: ${metrics['won_value']:,.2f}\n\n"
+                    markdown += f"- Open: {metrics['open_deals']} | Won: {metrics['won_deals']} | Dead: {metrics['dead_deals']}\n"
+                    markdown += f"- Win Rate (of closed deals): {win_rate:.1f}%\n"
+                    markdown += f"- Total Value: {_inr(metrics['total_value'])}\n"
+                    markdown += f"- Won Value: {_inr(metrics['won_value'])}\n\n"
             else:
                 markdown += "No deals data available for sector analysis.\n"
         else:
@@ -150,8 +153,9 @@ def generate_leadership_update() -> str:
                     amount_receivable = wo.get('amount_receivable', 0) or 0
                     amount_billed = wo.get('amount_to_billed', 0) or 0
                     
+                    # Nothing left to bill but money still owed
                     if amount_receivable > 0 and amount_billed == 0:
-                        issues.append("Receivable but not billed")
+                        issues.append("Receivable outstanding, nothing left to bill")
                     
                     # Check for old uncompleted work orders
                     invoice_date = wo.get('invoice_date')
@@ -185,7 +189,7 @@ def generate_leadership_update() -> str:
                         for wo in high_risk[:5]:  # Show top 5
                             markdown += f"**{wo['wo_number']}** - {wo['client']} ({wo['sector']})\n"
                             markdown += f"- Issues: {', '.join(wo['issues'])}\n"
-                            markdown += f"- Amount: ${wo['amount']:,.2f}\n\n"
+                            markdown += f"- Amount receivable: {_inr(wo['amount'])}\n\n"
                     
                     if medium_risk:
                         markdown += "### 🟡 Medium Risk\n\n"
@@ -194,8 +198,9 @@ def generate_leadership_update() -> str:
                             markdown += f"**{wo['wo_number']}** - {wo['client']}\n"
                             markdown += f"- Issue: {wo['issues'][0]}\n\n"
                     
-                    if len(at_risk) > 10:
-                        markdown += f"*... and {len(at_risk) - 10} more at-risk work orders*\n"
+                    shown = min(5, len(high_risk)) + min(5, len(medium_risk))
+                    if len(at_risk) > shown:
+                        markdown += f"*... and {len(at_risk) - shown} more at-risk work orders*\n"
                 else:
                     markdown += "✅ No at-risk work orders identified.\n"
             else:

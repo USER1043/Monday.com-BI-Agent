@@ -19,8 +19,8 @@ Per BUILD_BRIEF.md Section 2:
 import re
 import hashlib
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta
-from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -45,6 +45,7 @@ class AnomalyType(Enum):
     STAGE_STATUS_MISMATCH = "stage_status_mismatch"
     MISSING_VALUE = "missing_value"
     PARSE_FAILURE = "parse_failure"
+    DUPLICATE_ROW = "duplicate_row"
 
 
 @dataclass
@@ -64,6 +65,9 @@ class DataQualityReport:
     excluded_fraction: float
     anomalies: List[Anomaly]
     total_rows: int
+    # Normalized rows excluded for invalid values, kept so tools can work out
+    # how many excluded rows fall inside a query's filters (materiality).
+    excluded_records: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def is_null_sentinel(value: Any) -> bool:
@@ -116,23 +120,30 @@ def normalize_date(value: Any) -> Optional[str]:
         return None
     
     try:
+        if isinstance(value, (datetime, date)):
+            return value.strftime('%Y-%m-%d')
+
         if isinstance(value, str):
+            text = value.strip()
+            # Drop a time component ("2026-02-26 00:00:00", "2026-02-26T10:00:00Z")
+            if re.match(r'^\d{4}-\d{2}-\d{2}[ T]', text):
+                text = text[:10]
+
             # Try common date formats
             for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d', 
                        '%d-%m-%Y', '%m-%d-%Y', '%Y%m%d']:
                 try:
-                    dt = datetime.strptime(value.strip(), fmt)
+                    dt = datetime.strptime(text, fmt)
                     return dt.strftime('%Y-%m-%d')
                 except ValueError:
                     continue
             
             # Try Excel serial date format
             try:
-                excel_date = float(value)
+                excel_date = float(text)
                 if excel_date > 0:
-                    # Excel epoch is 1900-01-01, but Excel incorrectly treats 1900 as a leap year
-                    # For simplicity, we'll use a rough approximation
-                    dt = datetime(1899, 12, 30) + datetime.timedelta(days=excel_date)
+                    # Excel's day 0 is 1899-12-30 (it counts a non-existent 1900-02-29)
+                    dt = datetime(1899, 12, 30) + timedelta(days=excel_date)
                     return dt.strftime('%Y-%m-%d')
             except ValueError:
                 pass
@@ -206,6 +217,29 @@ def normalize_embedded_unit(value: Any) -> Tuple[Optional[float], Optional[str]]
     return None, None
 
 
+# The three billing fields use different vocabularies ("Fully Billed" vs "Closed"),
+# so contradictions are judged on what each value implies, not on string equality.
+# Values outside both sets (Stuck, Not Billable, Update Required) never contradict.
+FULLY_BILLED_VALUES = {"fully billed", "billed", "closed"}
+NOT_FULLY_BILLED_VALUES = {"partially billed", "not billed yet", "open"}
+
+
+def _billing_state(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.lower()
+    if text in FULLY_BILLED_VALUES:
+        return "fully_billed"
+    if text in NOT_FULLY_BILLED_VALUES or text.startswith("billed- visit"):
+        return "not_fully_billed"
+    return None
+
+
+def _billing_conflict(higher: Optional[str], lower: Optional[str]) -> bool:
+    higher_state, lower_state = _billing_state(higher), _billing_state(lower)
+    return higher_state is not None and lower_state is not None and higher_state != lower_state
+
+
 def unified_billing_status(invoice_status: Any, wo_status: Any, billing_status: Any) -> Tuple[str, List[Anomaly]]:
     """
     Compute unified billing status with precedence.
@@ -224,14 +258,14 @@ def unified_billing_status(invoice_status: Any, wo_status: Any, billing_status: 
     if invoice is not None:
         unified = invoice
         # Check for contradictions with lower precedence fields
-        if wo is not None and wo != invoice:
+        if _billing_conflict(invoice, wo):
             anomalies.append(Anomaly(
                 row_id="unknown",
                 type=AnomalyType.STATUS_CONTRADICTION,
                 detail=f"Invoice Status '{invoice}' conflicts with WO Status '{wo}'",
                 field="billing_status"
             ))
-        if billing is not None and billing != invoice:
+        if _billing_conflict(invoice, billing):
             anomalies.append(Anomaly(
                 row_id="unknown",
                 type=AnomalyType.STATUS_CONTRADICTION,
@@ -240,7 +274,7 @@ def unified_billing_status(invoice_status: Any, wo_status: Any, billing_status: 
             ))
     elif wo is not None:
         unified = wo
-        if billing is not None and billing != wo:
+        if _billing_conflict(wo, billing):
             anomalies.append(Anomaly(
                 row_id="unknown",
                 type=AnomalyType.STATUS_CONTRADICTION,
@@ -395,7 +429,8 @@ def normalize_deals_row(row: Dict[str, Any], row_id: str) -> Tuple[Dict[str, Any
     
     # Generate surrogate key
     client_code = row.get('Client Code', row.get('client_code', ''))
-    deal_name = row.get('Deal Name', row.get('deal_name', ''))
+    # Monday.com surfaces the board's item-name column as "Name"
+    deal_name = row.get('Deal Name', row.get('Name', row.get('deal_name', '')))
     created_date = row.get('Created Date', row.get('created_date', ''))
     deal_id = generate_deal_surrogate_key(client_code, deal_name, created_date)
     cleaned['deal_id'] = deal_id
@@ -404,7 +439,7 @@ def normalize_deals_row(row: Dict[str, Any], row_id: str) -> Tuple[Dict[str, Any
     cleaned['deal_name'] = normalize_text(deal_name)
     cleaned['client_code'] = normalize_text(client_code)
     cleaned['sector'] = normalize_text(row.get('Sector/service', row.get('Sector', row.get('sector', ''))))
-    cleaned['owner'] = normalize_text(row.get('Owner', row.get('owner', '')))
+    cleaned['owner'] = normalize_text(row.get('Owner code', row.get('Owner', row.get('owner', ''))))
     
     # Handle dates
     cleaned['created_date'] = normalize_date(created_date)
@@ -531,12 +566,28 @@ def normalize_deals_batch(rows: List[Dict[str, Any]]) -> DataQualityReport:
     Returns DataQualityReport with cleaned records and anomalies.
     """
     cleaned_records = []
+    excluded_records = []
     all_anomalies = []
     excluded_count = 0
+    seen_records = set()
+    
+    # Embedded sub-header rows repeat the column titles as values; they are not deals.
+    rows = [row for row in rows if row.get('Deal Status') != 'Deal Status']
     
     for i, row in enumerate(rows):
         row_id = f"deal_{i}"
         cleaned, anomalies = normalize_deals_row(row, row_id)
+        
+        # Exact duplicate rows are dropped so counts aren't inflated
+        record_key = tuple(sorted((k, str(v)) for k, v in cleaned.items()))
+        if record_key in seen_records:
+            all_anomalies.append(Anomaly(
+                row_id=row_id,
+                type=AnomalyType.DUPLICATE_ROW,
+                detail=f"Exact duplicate of an earlier deal row ({cleaned.get('deal_name')}); dropped"
+            ))
+            continue
+        seen_records.add(record_key)
         
         # Exclude rows with critical invalid values
         has_critical_invalid = any(
@@ -547,12 +598,13 @@ def normalize_deals_batch(rows: List[Dict[str, Any]]) -> DataQualityReport:
         
         if has_critical_invalid:
             excluded_count += 1
+            excluded_records.append(cleaned)
         else:
             cleaned_records.append(cleaned)
         
         all_anomalies.extend(anomalies)
     
-    total_rows = len(rows)
+    total_rows = len(cleaned_records) + len(excluded_records)
     excluded_fraction = excluded_count / total_rows if total_rows > 0 else 0
     
     return DataQualityReport(
@@ -560,7 +612,8 @@ def normalize_deals_batch(rows: List[Dict[str, Any]]) -> DataQualityReport:
         excluded_count=excluded_count,
         excluded_fraction=excluded_fraction,
         anomalies=all_anomalies,
-        total_rows=total_rows
+        total_rows=total_rows,
+        excluded_records=excluded_records
     )
 
 
@@ -570,6 +623,7 @@ def normalize_work_orders_batch(rows: List[Dict[str, Any]]) -> DataQualityReport
     Returns DataQualityReport with cleaned records and anomalies.
     """
     cleaned_records = []
+    excluded_records = []
     all_anomalies = []
     excluded_count = 0
     
@@ -586,6 +640,7 @@ def normalize_work_orders_batch(rows: List[Dict[str, Any]]) -> DataQualityReport
         
         if has_critical_invalid:
             excluded_count += 1
+            excluded_records.append(cleaned)
         else:
             cleaned_records.append(cleaned)
         
@@ -599,7 +654,8 @@ def normalize_work_orders_batch(rows: List[Dict[str, Any]]) -> DataQualityReport
         excluded_count=excluded_count,
         excluded_fraction=excluded_fraction,
         anomalies=all_anomalies,
-        total_rows=total_rows
+        total_rows=total_rows,
+        excluded_records=excluded_records
     )
 
 

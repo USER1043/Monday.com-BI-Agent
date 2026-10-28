@@ -97,9 +97,10 @@ This script:
 
 | Variable | Description | Required |
 |---|---|---|
-| MONDAY_API_TOKEN | Monday.com API token for board access | Yes |
-| DEALS_BOARD_ID | Board ID for Deals board (from setup script) | Yes |
-| WORK_ORDERS_BOARD_ID | Board ID for Work Orders board (from setup script) | Yes |
+| DATA_SOURCE | `auto` (Monday.com MCP, falling back to the Excel snapshots in `Data/`), `monday` (MCP only) or `excel` (snapshots only). Defaults to `auto` | No |
+| MONDAY_API_TOKEN | Monday.com API token for board access | Unless `DATA_SOURCE=excel` |
+| DEALS_BOARD_ID | Board ID for Deals board (from setup script) | Unless `DATA_SOURCE=excel` |
+| WORK_ORDERS_BOARD_ID | Board ID for Work Orders board (from setup script) | Unless `DATA_SOURCE=excel` |
 | GROQ_API_KEY | Groq API key for gpt-oss-120b access | Yes |
 
 For local development, create a `.env` file based on `.env.example`. For Streamlit Cloud deployment, add these as secrets in the app settings.

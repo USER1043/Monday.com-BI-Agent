@@ -17,7 +17,7 @@ import json
 from typing import Dict, List, Any, Optional, Callable
 from dataclasses import dataclass
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -32,7 +32,7 @@ except ImportError:
 from tools import (
     TOOL_FUNCTIONS, TOOL_DEFINITIONS,
     get_org_settings, set_org_setting,
-    get_board_schemas
+    get_deals, get_work_orders, format_money_fields
 )
 from leadership_update import generate_leadership_update, is_leadership_update_request
 
@@ -75,6 +75,7 @@ class GroqAgent:
         # the normal conversation history so the model can resolve any kind of
         # ambiguity from the user's next message.
         self._pending_clarification_kind: Optional[str] = None
+        self._pending_question: Optional[str] = None
         
         # Initialize system prompt after all attributes are set
         self.system_prompt = self._build_system_prompt()
@@ -100,12 +101,19 @@ DOMAIN KNOWLEDGE:
 
 PIPELINE DEFAULTS:
 - "Pipeline value" defaults to active pipeline only: Deal Status = Open, valued by Masked Deal value, placed in-period by Tentative Close Date.
-- "Weighted pipeline value" should be calculated by multiplying the Masked Deal value by the `stage_probability` column (which is already provided in the data). Do not ask the user for probabilities.
+- "Weighted pipeline value" is Masked Deal value × stage probability and is already computed by the deal tools (`total_weighted_pipeline_value`). Do not ask the user for probabilities.
 - Won and Dead deals are excluded from this default. On Hold deals are shown separately, not dropped.
-- Broader views (include Won/Dead/On Hold) are available on explicit request.
+- Broader views (include Won/Dead/On Hold) are available on explicit request; pass status "All" for every status (e.g. win rates, totals across all deals).
+- Weighted pipeline only covers Open deals in stages A-F. Whenever you report a weighted pipeline figure you MUST also state how many of those deals used the stage-based probability fallback (`probability_fallback` in the tool output).
+- For "typical" or "average" deal size, lead with the median (`median_deal_value`); deal values are heavily skewed, so if you mention the mean, show it next to the median.
+- Deal tools return `overdue_open_deals`: Open deals whose Tentative Close Date has already passed. When it has a non-zero count, report it alongside the in-period figures as slipped deals that still need a new close date (count, total value, latest close date). If the in-period pipeline is empty, lead with this instead of only saying there is no pipeline.
 
 DATA QUALITY HANDLING:
 - Tools return data quality reports with anomalies. Do not expose these technical reports to the founder unless it drastically impacts the core metric being asked (e.g., if everything is empty). Keep the focus on the business numbers.
+- Exceptions you must always surface, briefly and in business terms:
+  * Work orders excluded for invalid (negative) amounts (`excluded_invalid_rows` > 0): state how many were left out of the totals.
+  * Any `*_disclosure` with disclosure_type "estimate_range": give the confirmed figure and the labeled estimated upper bound.
+  * "quiet_footnote" disclosures with excluded_count > 0: one short footnote line.
 
 QUARTER CONVENTION:
 - The first time a quarter-dependent query comes in, ask whether they use calendar quarters or fiscal quarters (and which month starts the fiscal year)
@@ -130,37 +138,34 @@ You are a top-tier Business Intelligence executive assistant for the founders of
 - NEVER speak like a Data Scientist investigating a dataset. Do NOT mention "rows", "nulls", "sparsity", "API limits", or "tokens". 
 - STRICT RULE: NEVER mention internal tool names (e.g., 'get_deals', 'get_deal_metrics'). NEVER mention internal backend column names (e.g., 'masked_deal_value', 'stage_probability'). NEVER explain the mathematical formulas or queries used to get the data.
 - Do NOT create tables with "Notes" or "Comments" columns that expose how you processed the data. Just present the final business figures cleanly.
-- ESCAPE DOLLAR SIGNS: Because the UI renders markdown, you MUST escape dollar signs (e.g., write `\$21M` instead of `$21M`) to prevent the numbers from being rendered as broken LaTeX math equations.
+- CURRENCY: All monetary values are in Indian Rupees and tool outputs already format them in crore (Cr), lakh (L) or rupees. Copy amounts exactly as the tools give them; never convert units yourself, never use millions, never use $.
 - Deliver your insights in a clean, professional, board-ready format.
 """
         
         return prompt
     
     def _load_domain_vocabulary(self) -> str:
-        """Load domain vocabulary from actual board schemas."""
+        """Load domain vocabulary (sectors, stages, statuses) from the live board data."""
         if self._domain_vocab_loaded:
             return self._domain_vocabulary_str
         
         try:
-            # Get board schemas to learn actual values
-            schemas_result = get_board_schemas()
-            if schemas_result.success:
-                schemas = schemas_result.data
+            deals = get_deals(status="All")
+            work_orders = get_work_orders()
+            if deals.success and work_orders.success:
+                def values(records: List[Dict[str, Any]], field: str) -> str:
+                    return ", ".join(sorted({r[field] for r in records if r.get(field)}))
                 
-                vocab = "\nACTUAL DOMAIN VALUES FROM BOARDS:\n"
-                
-                # Extract unique values from schemas
-                if "deals" in schemas:
-                    vocab += "Deals Board:\n"
-                    # This would be populated from actual schema analysis
-                    vocab += "- Sectors: [will be populated from actual data]\n"
-                    vocab += "- Deal Stages: [will be populated from actual data]\n"
-                    vocab += "- Deal Status values: [will be populated from actual data]\n"
-                
-                if "work_orders" in schemas:
-                    vocab += "Work Orders Board:\n"
-                    vocab += "- Sectors: [will be populated from actual data]\n"
-                    vocab += "- Unified Billing Status values: [will be populated from actual data]\n"
+                vocab = "\nACTUAL DOMAIN VALUES FROM BOARDS (use these exact values in tool filters):\n"
+                vocab += "Deals Board:\n"
+                vocab += f"- Sectors: {values(deals.data, 'sector')}\n"
+                vocab += f"- Deal Stages (in order): {values(deals.data, 'deal_stage')}\n"
+                vocab += f"- Deal Status values: {values(deals.data, 'deal_status')}\n"
+                vocab += f"- Owners: {values(deals.data, 'owner')}\n"
+                vocab += "Work Orders Board:\n"
+                vocab += f"- Sectors: {values(work_orders.data, 'sector')}\n"
+                vocab += f"- Unified Billing Status values: {values(work_orders.data, 'unified_billing_status')}\n"
+                vocab += "  (Invoice Status first, then WO Status (billed) Open/Closed, then Billing Status)\n"
                 
                 self._domain_vocabulary_str = vocab
                 self._domain_vocab_loaded = True
@@ -200,49 +205,67 @@ Work Orders Board:
                 return "When you say 'this quarter', do you mean calendar quarter, or fiscal quarter (and if fiscal, which month does your fiscal year start)?"
         return "When you say 'this quarter', do you mean calendar quarter, or fiscal quarter (and if fiscal, which month does your fiscal year start)?"
     
-    def _resolve_quarter_date_range(self, quarter_ref: str) -> Dict[str, str]:
-        """Resolve a quarter reference to actual date range."""
+    @staticmethod
+    def _fiscal_year_start_month() -> int:
+        """Month the (fiscal) year starts in under the stored convention; 1 for calendar."""
         settings = get_org_settings()
-        if settings.success:
-            convention = settings.data.get("fiscal_quarter_convention", "calendar")
-            fy_start = settings.data.get("fiscal_year_start_month", "1")
-        else:
-            convention = "calendar"
-            fy_start = "1"
+        data = settings.data if settings.success else {}
+        if data.get("fiscal_quarter_convention") == "fiscal":
+            return int(data.get("fiscal_year_start_month", 1))
+        return 1
+    
+    def _resolve_quarter_date_range(self, today: Optional[date] = None) -> Dict[str, str]:
+        """Resolve the current quarter's date range under the stored convention."""
+        settings = get_org_settings()
+        convention = (settings.data if settings.success else {}).get("fiscal_quarter_convention", "calendar")
+        fy_start_month = self._fiscal_year_start_month()
+        today = today or date.today()
         
-        # This is a simplified implementation
-        # In production, you'd use proper date libraries
-        now = datetime.now()
+        months_into_year = (today.month - fy_start_month) % 12
+        start_year, start_month = today.year, today.month - months_into_year % 3
+        if start_month <= 0:
+            start_year, start_month = start_year - 1, start_month + 12
+        end_year, end_month = start_year, start_month + 3
+        if end_month > 12:
+            end_year, end_month = end_year + 1, end_month - 12
         
-        if convention == "calendar":
-            # Calendar quarters
-            quarter = (now.month - 1) // 3 + 1
-            start_month = (quarter - 1) * 3 + 1
-        else:
-            # Fiscal quarters
-            fy_start_month = int(fy_start)
-            month_offset = (now.month - fy_start_month) % 12
-            quarter = (month_offset // 3) + 1
-            start_month = ((quarter - 1) * 3 + fy_start_month - 1) % 12 + 1
-        
-        start_date = datetime(now.year, start_month, 1).strftime('%Y-%m-%d')
-        
-        # Calculate end date
-        if start_month == 12:
-            end_date = datetime(now.year + 1, 3, 31).strftime('%Y-%m-%d')
-        elif start_month >= 10:
-            end_date = datetime(now.year + 1, (start_month - 9) % 12 + 1, 1) - timedelta(days=1)
-            end_date = end_date.strftime('%Y-%m-%d')
-        else:
-            end_date = datetime(now.year, start_month + 3, 1) - timedelta(days=1)
-            end_date = end_date.strftime('%Y-%m-%d')
+        start_date = date(start_year, start_month, 1).isoformat()
+        end_date = (date(end_year, end_month, 1) - timedelta(days=1)).isoformat()
+        quarter_number = months_into_year // 3 + 1
         
         return {
             "date_from": start_date,
             "date_to": end_date,
             "convention": convention,
-            "description": f"{convention.capitalize()} quarter ({start_date} to {end_date})"
+            "description": f"{convention.capitalize()} Q{quarter_number} ({start_date} to {end_date})"
         }
+    
+    def _date_context(self) -> str:
+        """Today's date and the current quarter, so relative periods resolve correctly."""
+        context = f"\n\nTODAY'S DATE: {date.today().isoformat()}\n"
+        if self._check_quarter_convention() is None:
+            today = date.today()
+            quarter = self._resolve_quarter_date_range(today)
+            context += (
+                f"CURRENT QUARTER (org convention): {quarter['description']}. "
+                "Use exactly this range for \"this quarter\"; shift it by 3 months for last/next quarter.\n"
+            )
+            # The current (fiscal) year's quarters, so named quarters resolve without re-asking
+            fy_start_month = self._fiscal_year_start_month()
+            fy_start = date(today.year if today.month >= fy_start_month else today.year - 1, fy_start_month, 1)
+            quarters = []
+            for _ in range(4):
+                q = self._resolve_quarter_date_range(fy_start)
+                quarters.append(q["description"])
+                fy_start = date.fromisoformat(q["date_to"]) + timedelta(days=1)
+            context += (
+                f"QUARTERS OF THE CURRENT YEAR UNDER THIS CONVENTION: {'; '.join(quarters)}.\n"
+                "Apply the stored convention to every quarter reference, including named ones like "
+                "\"Q1 2026\"; resolve them yourself instead of asking again, and state the date range used. "
+                "For a fiscal quarter in another year, assume the fiscal year is named after the calendar "
+                "year it starts in and say so.\n"
+            )
+        return context
     
     def _detect_quarter_reference(self, user_message: str) -> bool:
         """Detect if user message contains quarter reference."""
@@ -258,22 +281,21 @@ Work Orders Board:
             return False
 
         user_message_lower = user_message.lower()
+        months = ["january", "february", "march", "april", "may", "june", 
+                 "july", "august", "september", "october", "november", "december"]
+        month_match = re.search(r"\b(" + "|".join(months) + r")\b", user_message_lower)
+        current = get_org_settings()
+        already_fiscal = current.success and current.data.get("fiscal_quarter_convention") == "fiscal"
         
         # Check if this is an answer to the quarter convention question
         if "calendar" in user_message_lower:
             set_org_setting("fiscal_quarter_convention", "calendar")
             return True
-        elif "fiscal" in user_message_lower:
+        elif "fiscal" in user_message_lower or (already_fiscal and month_match):
+            # A bare month answers the follow-up "which month does your FY start?"
             set_org_setting("fiscal_quarter_convention", "fiscal")
-            
-            # Try to extract the fiscal year start month
-            months = ["january", "february", "march", "april", "may", "june", 
-                     "july", "august", "september", "october", "november", "december"]
-            for i, month in enumerate(months, 1):
-                if month in user_message_lower:
-                    set_org_setting("fiscal_year_start_month", str(i))
-                    break
-            
+            if month_match:
+                set_org_setting("fiscal_year_start_month", str(months.index(month_match.group(1)) + 1))
             return True
         
         return False
@@ -295,7 +317,7 @@ Work Orders Board:
         
         output = f"Tool: {tool_name}\n"
         
-        data = result.get("data")
+        data = format_money_fields(result.get("data"))
         if data:
             if tool_name == "get_board_schemas" and isinstance(data, dict):
                 # Strip out bulky settings (labels, colors) from schema to save tokens
@@ -306,7 +328,7 @@ Work Orders Board:
                             {"id": c.get("id"), "title": c.get("title"), "type": c.get("type")}
                             for c in cols if isinstance(c, dict)
                         ]
-                output += f"Data: {json.dumps(compact_schema, default=str)}\n"
+                output += f"Data: {json.dumps(compact_schema, default=str, ensure_ascii=False)}\n"
             elif isinstance(data, list):
                 output += f"Returned {len(data)} records\n"
                 if len(data) > 0:
@@ -331,7 +353,7 @@ Work Orders Board:
                         if len(data) > max_records:
                             output += f"...(Truncated {len(data) - max_records} records to save tokens). Use the 'aggregations' metadata below for totals.\n"
             else:
-                output += f"Data: {json.dumps(data, indent=2, default=str)}\n"
+                output += f"Data: {json.dumps(data, indent=2, default=str, ensure_ascii=False)}\n"
         
         qr = result.get("quality_report")
         if qr:
@@ -346,9 +368,9 @@ Work Orders Board:
                 for anomaly in qr.anomalies[:3]:
                     output += f"  * {anomaly.type.value if hasattr(anomaly.type, 'value') else str(anomaly.type)}: {anomaly.detail}\n"
         
-        metadata = result.get("metadata")
+        metadata = format_money_fields(result.get("metadata"))
         if metadata:
-            output += f"\nMetadata: {json.dumps(metadata, indent=2, default=str)}\n"
+            output += f"\nMetadata: {json.dumps(metadata, indent=2, default=str, ensure_ascii=False)}\n"
         
         return output
     
@@ -403,9 +425,23 @@ Work Orders Board:
         
         # Check if user is answering the quarter convention question
         if self._process_quarter_convention_answer(user_message):
-            self._pending_clarification_kind = None
             self.conversation_history.append(AgentMessage(role="user", content=user_message))
-            confirmation = "Got it! I'll use that convention for quarter-based questions going forward. Please go ahead and ask your question again."
+            follow_up = self._check_quarter_convention()
+            if follow_up:
+                # Fiscal year chosen without a start month: ask for it
+                self.conversation_history.append(AgentMessage(role="assistant", content=follow_up))
+                return AgentResponse(
+                    content=follow_up,
+                    tool_calls_made=[],
+                    data_quality_info=[],
+                    clarifying_question_asked=True
+                )
+            self._pending_clarification_kind = None
+            original_question, self._pending_question = self._pending_question, None
+            if original_question:
+                # Answer the question that triggered the clarification
+                return self._process_normal_query(original_question)
+            confirmation = "Got it! I'll use that convention for quarter-based questions going forward."
             self.conversation_history.append(AgentMessage(role="assistant", content=confirmation))
             return AgentResponse(
                 content=confirmation,
@@ -413,6 +449,10 @@ Work Orders Board:
                 data_quality_info=[],
                 clarifying_question_asked=False
             )
+        
+        # Any other message means the user moved on from a pending clarification
+        self._pending_clarification_kind = None
+        self._pending_question = None
         
         # Check for quarter convention (only for non-leadership-update queries)
         quarter_question = None
@@ -422,6 +462,7 @@ Work Orders Board:
         # If quarter convention needs to be set, ask first
         if quarter_question:
             self._pending_clarification_kind = "quarter"
+            self._pending_question = user_message
             self.conversation_history.append(AgentMessage(role="user", content=user_message))
             self.conversation_history.append(AgentMessage(role="assistant", content=quarter_question))
             return AgentResponse(
@@ -441,17 +482,12 @@ Work Orders Board:
         
         # Prepare messages for API
         messages = [
-            {"role": "system", "content": self.system_prompt}
+            {"role": "system", "content": self.system_prompt + self._date_context()}
         ]
         
         # Add conversation history
         for msg in self.conversation_history:
-            api_msg = {"role": msg.role, "content": msg.content}
-            if msg.tool_calls:
-                api_msg["tool_calls"] = msg.tool_calls
-            if msg.tool_results:
-                api_msg["tool_results"] = msg.tool_results
-            messages.append(api_msg)
+            messages.append({"role": msg.role, "content": msg.content})
         
         # Make API call with tools
         tool_calls_made = []
@@ -502,16 +538,10 @@ Work Orders Board:
                             "content": self._format_tool_result(tool_name, result)
                         })
                     
-                    # Add assistant message and tool results to conversation
-                    self.conversation_history.append(
-                        AgentMessage(
-                            role="assistant",
-                            content=assistant_message.content or "",
-                            tool_calls=[tc.model_dump() for tc in assistant_message.tool_calls]
-                        )
-                    )
-                    
-                    # Add tool results as a single message
+                    # Tool calls and their results stay in this request only. The
+                    # persistent history keeps user turns and final answers, so a
+                    # later request never carries tool calls without their results
+                    # and every new question re-calls the tools.
                     messages.append({
                         "role": "assistant",
                         "content": assistant_message.content or "",
@@ -567,6 +597,7 @@ Work Orders Board:
         """Reset the conversation history."""
         self.conversation_history = []
         self._pending_clarification_kind = None
+        self._pending_question = None
 
 
 def create_agent(api_key: str) -> GroqAgent:
@@ -599,9 +630,7 @@ def test_tool_calling_reliability(agent: GroqAgent) -> bool:
             # Check if tools were actually called
             if not response.tool_calls_made:
                 print("WARNING: Model did not call any tools for this query!")
-                # This might be due to MCP connection issues, not model behavior
-                # Return True to allow the app to continue
-                return True
+                return False
             
             # Test follow-up query with different filter
             follow_up = "Now show me deals in the Construction sector"
@@ -613,8 +642,7 @@ def test_tool_calling_reliability(agent: GroqAgent) -> bool:
             # Check if model re-called tools for the different query
             if not response2.tool_calls_made:
                 print("WARNING: Model did not re-call tools for follow-up query!")
-                # Allow continuation as this might be due to MCP issues
-                return True
+                return False
             
         except Exception as e:
             print(f"ERROR: {e}")

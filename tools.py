@@ -11,6 +11,7 @@ Per BUILD_BRIEF.md Section 4:
 
 import json
 import os
+import statistics
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime, date
 from dataclasses import dataclass, asdict
@@ -22,7 +23,7 @@ load_dotenv()
 from normalization import (
     normalize_deals_batch, normalize_work_orders_batch, 
     DataQualityReport, AnomalyType, drop_null_columns,
-    calculate_materiality_disclosure, MATERIALITY_THRESHOLD
+    calculate_materiality_disclosure, MATERIALITY_THRESHOLD, STAGE_PROBABILITY
 )
 from data_source import (
     get_deals_data as sync_get_deals_data,
@@ -105,6 +106,130 @@ class OrgSettings:
 org_settings = OrgSettings()
 
 
+# Keys holding rupee amounts in normalized records and tool aggregates
+MONEY_FIELDS = {
+    "masked_deal_value", "amount_to_billed", "amount_receivable",
+    "total_masked_deal_value", "median_deal_value", "mean_deal_value",
+    "total_weighted_pipeline_value", "total_amount_to_be_billed", "total_amount_receivable",
+    "value", "confirmed_value", "estimated_upper_bound",
+}
+
+
+def format_inr(value: float) -> str:
+    """Format rupees as Indian finance teams read them: crore, lakh, or plain rupees."""
+    sign = "-" if value < 0 else ""
+    amount = abs(value)
+    if amount >= 1e7:
+        return f"{sign}₹{amount / 1e7:,.2f} Cr"
+    if amount >= 1e5:
+        return f"{sign}₹{amount / 1e5:,.2f} L"
+    return f"{sign}₹{amount:,.0f}"
+
+
+def format_money_fields(obj: Any) -> Any:
+    """
+    Replace rupee amounts with formatted strings before they reach the model, so
+    it copies figures instead of converting units itself (it slips by 10x).
+    """
+    if isinstance(obj, dict):
+        return {
+            k: format_inr(v) if k in MONEY_FIELDS and isinstance(v, (int, float)) and not isinstance(v, bool)
+            else format_money_fields(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [format_money_fields(item) for item in obj]
+    return obj
+
+
+# Status values that mean "don't filter on status"
+ALL_STATUSES = {"all", "any", "*"}
+
+# group_by names the model may use, mapped to normalized record fields
+DEAL_GROUP_FIELDS = {
+    "sector": "sector", "stage": "deal_stage", "deal_stage": "deal_stage",
+    "status": "deal_status", "deal_status": "deal_status", "owner": "owner",
+    "client": "client_code", "client_code": "client_code",
+}
+WORK_ORDER_GROUP_FIELDS = {
+    "sector": "sector", "billing_status": "unified_billing_status",
+    "unified_billing_status": "unified_billing_status", "status": "unified_billing_status",
+    "client": "client_name", "client_name": "client_name", "owner": "owner",
+    "type_of_work": "type_of_work",
+}
+
+
+def _text_matches(value: Optional[str], query: str, partial: bool = False) -> bool:
+    """Case-insensitive match; partial lets "Negotiations" match "F. Negotiations"."""
+    if not value:
+        return False
+    value, query = value.lower(), query.strip().lower()
+    return query in value if partial else value == query
+
+
+def _group_records(records: List[Dict[str, Any]], field: str) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for r in records:
+        grouped.setdefault(r.get(field) or "Unknown", []).append(r)
+    return grouped
+
+
+def summarize_deal_values(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Value aggregates for a set of normalized deals.
+    Weighted pipeline only covers Open deals in stages A-F (BUILD_BRIEF 2.6) and
+    always reports how many of those used the stage-probability fallback.
+    """
+    values = [float(r['masked_deal_value']) for r in records if r.get('masked_deal_value') is not None]
+    total_value = sum(values)
+    weighted_scope = [
+        r for r in records
+        if r.get('deal_status') == 'Open' and r.get('deal_stage') in STAGE_PROBABILITY
+    ]
+    fallback_count = sum(1 for r in weighted_scope if r.get('used_probability_fallback'))
+    return {
+        "count": len(records),
+        "total_masked_deal_value": total_value,
+        # Deal values are heavily right-skewed: median is the "typical deal size"
+        "median_deal_value": statistics.median(values) if values else None,
+        "mean_deal_value": statistics.mean(values) if values else None,
+        "value_disclosure": calculate_materiality_disclosure(
+            len(records), len(records) - len(values), total_value, "masked_deal_value"
+        ),
+        "total_weighted_pipeline_value": sum(
+            float(r.get('masked_deal_value') or 0) * float(r.get('stage_probability') or 0)
+            for r in weighted_scope
+        ),
+        "weighted_pipeline_deal_count": len(weighted_scope),
+        "probability_fallback": {
+            "count": fallback_count,
+            "fraction": fallback_count / len(weighted_scope) if weighted_scope else 0.0,
+        },
+    }
+
+
+def summarize_work_order_values(records: List[Dict[str, Any]], excluded: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Billing aggregates for a set of normalized work orders. `excluded` holds the
+    in-scope rows dropped for invalid (negative) amounts, for the materiality disclosure.
+    """
+    total_billed = sum(float(r.get('amount_to_billed') or 0) for r in records)
+    total_receivable = sum(float(r.get('amount_receivable') or 0) for r in records)
+    matched = len(records) + len(excluded)
+    return {
+        "count": len(records),
+        "total_amount_to_be_billed": total_billed,
+        "total_amount_receivable": total_receivable,
+        "excluded_invalid_rows": len(excluded),
+        "amount_to_be_billed_disclosure": calculate_materiality_disclosure(
+            matched, len(excluded), total_billed, "amount_to_billed"
+        ),
+        "amount_receivable_disclosure": calculate_materiality_disclosure(
+            matched, len(excluded), total_receivable, "amount_receivable"
+        ),
+    }
+
+
 def apply_deals_filters(records: List[Dict[str, Any]], filters: DealFilters) -> List[Dict[str, Any]]:
     """Apply filters to deals records."""
     filtered = records
@@ -113,16 +238,17 @@ def apply_deals_filters(records: List[Dict[str, Any]], filters: DealFilters) -> 
         filtered = [r for r in filtered if r.get('sector') and filters.sector.lower() in r.get('sector').lower()]
     
     if filters.stage:
-        filtered = [r for r in filtered if r.get('deal_stage') == filters.stage]
+        filtered = [r for r in filtered if _text_matches(r.get('deal_stage'), filters.stage, partial=True)]
     
     if filters.status:
-        filtered = [r for r in filtered if r.get('deal_status') == filters.status]
+        if filters.status.strip().lower() not in ALL_STATUSES:
+            filtered = [r for r in filtered if _text_matches(r.get('deal_status'), filters.status)]
     else:
         # Default to Open deals if not specified
         filtered = [r for r in filtered if r.get('deal_status') == 'Open']
     
     if filters.owner:
-        filtered = [r for r in filtered if r.get('owner') == filters.owner]
+        filtered = [r for r in filtered if _text_matches(r.get('owner'), filters.owner, partial=True)]
     
     if filters.date_from:
         date_from = datetime.strptime(filters.date_from, '%Y-%m-%d').date()
@@ -139,6 +265,27 @@ def apply_deals_filters(records: List[Dict[str, Any]], filters: DealFilters) -> 
     return filtered
 
 
+def summarize_overdue_open_deals(records: List[Dict[str, Any]], filters: DealFilters) -> Dict[str, Any]:
+    """
+    Open deals (matching the non-date filters) whose tentative close date has
+    already passed. These sit outside any current/future period, so an
+    in-period pipeline can look empty while slipped deals are still open.
+    """
+    scope = DealFilters(sector=filters.sector, stage=filters.stage, status="Open", owner=filters.owner)
+    today = date.today()
+    overdue = [
+        r for r in apply_deals_filters(records, scope)
+        if r.get('tentative_close_date')
+        and datetime.strptime(r['tentative_close_date'], '%Y-%m-%d').date() < today
+    ]
+    return {
+        "as_of": today.isoformat(),
+        "count": len(overdue),
+        "total_masked_deal_value": sum(float(r.get('masked_deal_value') or 0) for r in overdue),
+        "latest_tentative_close_date": max((r['tentative_close_date'] for r in overdue), default=None),
+    }
+
+
 def apply_work_orders_filters(records: List[Dict[str, Any]], filters: WorkOrderFilters) -> List[Dict[str, Any]]:
     """Apply filters to work orders records."""
     filtered = records
@@ -147,7 +294,7 @@ def apply_work_orders_filters(records: List[Dict[str, Any]], filters: WorkOrderF
         filtered = [r for r in filtered if r.get('sector') and filters.sector.lower() in r.get('sector').lower()]
     
     if filters.billing_status:
-        filtered = [r for r in filtered if r.get('unified_billing_status') == filters.billing_status]
+        filtered = [r for r in filtered if _text_matches(r.get('unified_billing_status'), filters.billing_status)]
     
     if filters.client:
         filtered = [r for r in filtered if 
@@ -228,13 +375,6 @@ def get_deals(
         # Drop near-null columns to reduce context
         filtered_records = drop_null_columns(filtered_records)
         
-        # Calculate Aggregations for the LLM
-        total_value = sum(float(r.get('masked_deal_value') or 0) for r in filtered_records)
-        total_weighted = sum(
-            float(r.get('masked_deal_value') or 0) * float(r.get('stage_probability') or 0)
-            for r in filtered_records
-        )
-        
         return ToolResult(
             success=True,
             data=filtered_records,
@@ -242,11 +382,10 @@ def get_deals(
             metadata={
                 "total_raw_records": len(raw_data),
                 "filtered_records_count": len(filtered_records),
-                "aggregations": {
-                    "total_masked_deal_value": total_value,
-                    "total_weighted_pipeline_value": total_weighted
-                },
+                "aggregations": summarize_deal_values(filtered_records),
                 "filters_applied": asdict(filters),
+                "overdue_open_deals": summarize_overdue_open_deals(quality_report.cleaned_records, filters),
+                "currency": "INR",
                 "materiality_threshold": MATERIALITY_THRESHOLD
             }
         )
@@ -315,9 +454,7 @@ def get_work_orders(
         # Drop near-null columns to reduce context
         filtered_records = drop_null_columns(filtered_records)
         
-        # Calculate Aggregations for the LLM
-        total_billed = sum(float(r.get('amount_to_billed') or 0) for r in filtered_records)
-        total_receivable = sum(float(r.get('amount_receivable') or 0) for r in filtered_records)
+        excluded_in_scope = apply_work_orders_filters(quality_report.excluded_records, filters)
         
         return ToolResult(
             success=True,
@@ -326,11 +463,9 @@ def get_work_orders(
             metadata={
                 "total_raw_records": len(raw_data),
                 "filtered_records_count": len(filtered_records),
-                "aggregations": {
-                    "total_amount_to_be_billed": total_billed,
-                    "total_amount_receivable": total_receivable
-                },
+                "aggregations": summarize_work_order_values(filtered_records, excluded_in_scope),
                 "filters_applied": asdict(filters),
+                "currency": "INR",
                 "materiality_threshold": MATERIALITY_THRESHOLD
             }
         )
@@ -356,6 +491,16 @@ def get_deal_metrics(
     """
     Get aggregated deal metrics (sums, counts) with optional filtering and grouping.
     """
+    group_field = None
+    if group_by:
+        group_field = DEAL_GROUP_FIELDS.get(group_by.strip().lower())
+        if not group_field:
+            return ToolResult(
+                success=False,
+                data={},
+                error=f"Invalid group_by '{group_by}'. Use one of: {', '.join(sorted(DEAL_GROUP_FIELDS))}"
+            )
+    
     # Re-use get_deals logic but only return metrics
     result = get_deals(sector, stage, status, date_from, date_to, owner)
     if not result.success:
@@ -363,29 +508,24 @@ def get_deal_metrics(
         
     records = result.data
     
-    def _calc(recs):
-        return {
-            "count": len(recs),
-            "total_masked_deal_value": sum(float(r.get('masked_deal_value') or 0) for r in recs),
-            "total_weighted_pipeline_value": sum(float(r.get('masked_deal_value') or 0) * float(r.get('stage_probability') or 0) for r in recs)
-        }
-        
-    if not group_by:
-        metrics = _calc(records)
+    if not group_field:
+        metrics = summarize_deal_values(records)
     else:
-        grouped = {}
-        for r in records:
-            val = r.get(group_by, "Unknown")
-            if val not in grouped:
-                grouped[val] = []
-            grouped[val].append(r)
-        metrics = {k: _calc(v) for k, v in grouped.items()}
+        metrics = {
+            "overall": summarize_deal_values(records),
+            "groups": {k: summarize_deal_values(v) for k, v in _group_records(records, group_field).items()},
+        }
         
     return ToolResult(
         success=True,
         data={"metrics": metrics},
         quality_report=result.quality_report,
-        metadata={"filters_applied": result.metadata.get("filters_applied")}
+        metadata={
+            "filters_applied": result.metadata.get("filters_applied"),
+            "group_by_field": group_field,
+            "overdue_open_deals": result.metadata.get("overdue_open_deals"),
+            "currency": "INR"
+        }
     )
 
 def get_work_order_metrics(
@@ -399,35 +539,46 @@ def get_work_order_metrics(
     """
     Get aggregated work order metrics (sums, counts) with optional filtering and grouping.
     """
+    group_field = None
+    if group_by:
+        group_field = WORK_ORDER_GROUP_FIELDS.get(group_by.strip().lower())
+        if not group_field:
+            return ToolResult(
+                success=False,
+                data={},
+                error=f"Invalid group_by '{group_by}'. Use one of: {', '.join(sorted(WORK_ORDER_GROUP_FIELDS))}"
+            )
+    
     result = get_work_orders(sector, billing_status, date_from, date_to, client)
     if not result.success:
         return result
         
     records = result.data
+    excluded = apply_work_orders_filters(
+        result.quality_report.excluded_records, WorkOrderFilters(**result.metadata["filters_applied"])
+    )
     
-    def _calc(recs):
-        return {
-            "count": len(recs),
-            "total_amount_to_be_billed": sum(float(r.get('amount_to_billed') or 0) for r in recs),
-            "total_amount_receivable": sum(float(r.get('amount_receivable') or 0) for r in recs)
-        }
-        
-    if not group_by:
-        metrics = _calc(records)
+    if not group_field:
+        metrics = summarize_work_order_values(records, excluded)
     else:
-        grouped = {}
-        for r in records:
-            val = r.get(group_by, "Unknown")
-            if val not in grouped:
-                grouped[val] = []
-            grouped[val].append(r)
-        metrics = {k: _calc(v) for k, v in grouped.items()}
+        excluded_groups = _group_records(excluded, group_field)
+        metrics = {
+            "overall": summarize_work_order_values(records, excluded),
+            "groups": {
+                k: summarize_work_order_values(v, excluded_groups.get(k, []))
+                for k, v in _group_records(records, group_field).items()
+            },
+        }
         
     return ToolResult(
         success=True,
         data={"metrics": metrics},
         quality_report=result.quality_report,
-        metadata={"filters_applied": result.metadata.get("filters_applied")}
+        metadata={
+            "filters_applied": result.metadata.get("filters_applied"),
+            "group_by_field": group_field,
+            "currency": "INR"
+        }
     )
 
 
@@ -592,17 +743,17 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_deal_metrics",
-            "description": "Get aggregated mathematical metrics for deals (e.g. total value, weighted pipeline, counts). Supports filtering and optional grouping (e.g. group_by='sector'). Use this instead of get_deals when the user asks for sums, totals, or aggregates.",
+            "description": "Get aggregated metrics for deals: count, total value, median/mean deal value, weighted pipeline (Open deals in stages A-F only) with probability-fallback disclosure, and value materiality disclosure. All values in INR. Supports filtering and optional grouping. Use this instead of get_deals when the user asks for sums, totals, counts or averages.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sector": {"type": ["string", "null"], "description": "Filter by sector"},
-                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage"},
-                    "status": {"type": ["string", "null"], "description": "Filter by deal status (defaults to 'Open' if not specified)"},
+                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage; partial, case-insensitive match (e.g. 'Negotiations' matches 'F. Negotiations')"},
+                    "status": {"type": ["string", "null"], "description": "Filter by deal status: Open, Won, Dead, On Hold, or 'All' for every status (defaults to 'Open' if not specified)"},
                     "date_from": {"type": ["string", "null"], "description": "Filter by tentative close date from (ISO format YYYY-MM-DD)"},
                     "date_to": {"type": ["string", "null"], "description": "Filter by tentative close date to (ISO format YYYY-MM-DD)"},
-                    "owner": {"type": ["string", "null"], "description": "Filter by owner"},
-                    "group_by": {"type": ["string", "null"], "description": "Field to group results by (e.g., 'sector', 'deal_stage', 'owner')"}
+                    "owner": {"type": ["string", "null"], "description": "Filter by owner code (e.g. 'OWNER_001')"},
+                    "group_by": {"type": ["string", "null"], "description": "Group results by one of: sector, stage, status, owner, client"}
                 }
             }
         }
@@ -611,16 +762,16 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_work_order_metrics",
-            "description": "Get aggregated mathematical metrics for work orders (e.g. total amount to be billed, receivable, counts). Supports filtering and grouping.",
+            "description": "Get aggregated metrics for work orders: count, total amount to be billed, total receivable, with materiality disclosure for rows excluded for invalid (negative) amounts. All values in INR. Supports filtering and grouping.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sector": {"type": ["string", "null"], "description": "Filter by sector"},
-                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status"},
-                    "date_from": {"type": ["string", "null"], "description": "Filter by invoice date from (ISO format YYYY-MM-DD)"},
-                    "date_to": {"type": ["string", "null"], "description": "Filter by invoice date to (ISO format YYYY-MM-DD)"},
+                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status (exact value, case-insensitive; see domain values)"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by last invoice date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by last invoice date to (ISO format YYYY-MM-DD)"},
                     "client": {"type": ["string", "null"], "description": "Filter by client name or code"},
-                    "group_by": {"type": ["string", "null"], "description": "Field to group results by (e.g., 'sector', 'unified_billing_status')"}
+                    "group_by": {"type": ["string", "null"], "description": "Group results by one of: sector, billing_status, client, owner, type_of_work"}
                 }
             }
         }
@@ -634,11 +785,11 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "sector": {"type": ["string", "null"], "description": "Filter by sector"},
-                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage"},
-                    "status": {"type": ["string", "null"], "description": "Filter by deal status (defaults to 'Open' if not specified)"},
+                    "stage": {"type": ["string", "null"], "description": "Filter by deal stage; partial, case-insensitive match (e.g. 'Negotiations' matches 'F. Negotiations')"},
+                    "status": {"type": ["string", "null"], "description": "Filter by deal status: Open, Won, Dead, On Hold, or 'All' for every status (defaults to 'Open' if not specified)"},
                     "date_from": {"type": ["string", "null"], "description": "Filter by tentative close date from (ISO format YYYY-MM-DD)"},
                     "date_to": {"type": ["string", "null"], "description": "Filter by tentative close date to (ISO format YYYY-MM-DD)"},
-                    "owner": {"type": ["string", "null"], "description": "Filter by owner"}
+                    "owner": {"type": ["string", "null"], "description": "Filter by owner code (e.g. 'OWNER_001')"}
                 }
             }
         }
@@ -652,9 +803,9 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "sector": {"type": ["string", "null"], "description": "Filter by sector"},
-                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status"},
-                    "date_from": {"type": ["string", "null"], "description": "Filter by invoice date from (ISO format YYYY-MM-DD)"},
-                    "date_to": {"type": ["string", "null"], "description": "Filter by invoice date to (ISO format YYYY-MM-DD)"},
+                    "billing_status": {"type": ["string", "null"], "description": "Filter by unified billing status (exact value, case-insensitive; see domain values)"},
+                    "date_from": {"type": ["string", "null"], "description": "Filter by last invoice date from (ISO format YYYY-MM-DD)"},
+                    "date_to": {"type": ["string", "null"], "description": "Filter by last invoice date to (ISO format YYYY-MM-DD)"},
                     "client": {"type": ["string", "null"], "description": "Filter by client name or code"}
                 }
             }
