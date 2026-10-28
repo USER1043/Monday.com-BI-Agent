@@ -288,17 +288,14 @@ def is_leadership_update_request(user_message: str) -> bool:
     Detect if the user is requesting a leadership update.
     
     This function checks for conversational phrasing that indicates
-    a leadership update request.
+    a leadership update request. Only explicit requests for the brief count;
+    scoped asks like "give me an update on Mining deals" go to the model.
     """
     leadership_keywords = [
         "leadership update",
         "weekly update",
         "executive update",
-        "management update",
-        "give me an update",
-        "status report",
-        "business update",
-        "executive summary"
+        "management update"
     ]
     
     user_message_lower = user_message.lower()

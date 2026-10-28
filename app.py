@@ -12,11 +12,11 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 from agent import create_agent, test_tool_calling_reliability
-from tools import get_org_settings, set_org_setting, org_settings
-from data_source import get_status as get_data_source_status
+from tools import OrgSettings
+from data_source import clear_cache as clear_data_cache, get_status as get_data_source_status
 
 # Load environment variables from .env file
-load_dotenv(), org_settings
+load_dotenv()
 
 
 def initialize_session_state():
@@ -26,18 +26,12 @@ def initialize_session_state():
         if not api_key:
             st.error("GROQ_API_KEY environment variable not set")
             st.stop()
-        st.session_state.agent = create_agent(api_key)
+        with st.spinner("Loading board data..."):
+            # In-memory settings: each visitor's quarter convention stays in their session
+            st.session_state.agent = create_agent(api_key, org_settings=OrgSettings(settings_file=None))
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    
-    if "org_settings" not in st.session_state:
-        # Load org settings from file
-        settings_result = get_org_settings()
-        if settings_result.success:
-            st.session_state.org_settings = settings_result.data
-        else:
-            st.session_state.org_settings = {}
     
     if "tool_calling_tested" not in st.session_state:
         st.session_state.tool_calling_tested = False
@@ -123,11 +117,6 @@ def main():
                     }
                 )
                 
-                # Update org settings in session state if they changed
-                settings_result = get_org_settings()
-                if settings_result.success:
-                    st.session_state.org_settings = settings_result.data
-                
             except Exception as e:
                 error_message = f"Error processing your request: {str(e)}"
                 st.error(error_message)
@@ -146,8 +135,9 @@ def main():
         
         # Display current org settings
         st.subheader("Organization Settings")
-        if st.session_state.org_settings:
-            for key, value in st.session_state.org_settings.items():
+        session_settings = st.session_state.agent.org_settings
+        if session_settings.get_all_settings():
+            for key, value in session_settings.get_all_settings().items():
                 st.text(f"{key}: {value}")
         else:
             st.text("No organization settings configured")
@@ -160,16 +150,18 @@ def main():
         
         # Reset org settings button
         if st.button("Reset Org Settings"):
-            org_settings._settings = {}
-            org_settings._save_settings()
-            st.session_state.org_settings = {}
+            session_settings.clear()
             st.rerun()
             
         # Test agent reliability button
         if st.button("Run Reliability Test"):
             with st.spinner("Testing agent tool-calling reliability..."):
                 try:
-                    reliability_ok = test_tool_calling_reliability(st.session_state.agent)
+                    # Separate agent so the test's questions don't end up in this chat's history
+                    test_agent = create_agent(
+                        os.environ.get("GROQ_API_KEY"), org_settings=OrgSettings(settings_file=None)
+                    )
+                    reliability_ok = test_tool_calling_reliability(test_agent)
                     if not reliability_ok:
                         st.sidebar.warning("Tool-calling reliability test had issues.")
                     else:
@@ -197,6 +189,11 @@ def main():
             st.text(f"Last read from: {source_labels[source_status['last_source']]}")
         if source_status["fallback_reason"]:
             st.caption(f"Fallback reason: {source_status['fallback_reason']}")
+        if source_status["cache_seconds"]:
+            st.caption(f"Monday.com reads are reused for {source_status['cache_seconds']}s.")
+            if st.button("Refresh data"):
+                clear_data_cache()
+                st.toast("Next question will fetch fresh board data.")
 
         groq_key = os.environ.get("GROQ_API_KEY")
         if groq_key:
@@ -213,7 +210,7 @@ def main():
         - "How's our pipeline looking this quarter?"
         - "What's our weighted pipeline value?"
         - "Which work orders are at risk of billing issues?"
-        - "Show me deals in the Agriculture sector"
+        - "Show me deals in the Renewables sector"
         - "What's our data quality status?"
         
         **Features:**

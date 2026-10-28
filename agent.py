@@ -24,13 +24,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from openai import OpenAI
+    from openai import OpenAI, RateLimitError
 except ImportError:
     print("Warning: OpenAI package not installed. Install with: pip install openai")
     OpenAI = None
+    RateLimitError = None
 
 from tools import (
     TOOL_FUNCTIONS, TOOL_DEFINITIONS,
+    OrgSettings, org_settings as default_org_settings, use_org_settings,
     get_org_settings, set_org_setting,
     get_deals, get_work_orders, format_money_fields
 )
@@ -58,14 +60,18 @@ class AgentResponse:
 class GroqAgent:
     """Agent that uses gpt-oss-120b via Groq API with tool calling."""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, org_settings: Optional[OrgSettings] = None):
         if OpenAI is None:
             raise RuntimeError("OpenAI package not installed")
         
         self.client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
-            api_key=api_key
+            api_key=api_key,
+            # Groq's free tier rate-limits bursts; the SDK backs off and retries
+            max_retries=4
         )
+        # Quarter convention etc.; the app passes an in-memory store per session
+        self.org_settings = org_settings or default_org_settings
         self.model = "openai/gpt-oss-120b"
         self.conversation_history: List[AgentMessage] = []
         self._domain_vocab_loaded = False
@@ -269,8 +275,8 @@ Work Orders Board:
     
     def _detect_quarter_reference(self, user_message: str) -> bool:
         """Detect if user message contains quarter reference."""
-        quarter_keywords = ["this quarter", "current quarter", "quarter", "q1", "q2", "q3", "q4"]
-        return any(keyword in user_message.lower() for keyword in quarter_keywords)
+        # Whole words only, so e.g. "headquarters" doesn't count
+        return re.search(r"\bquarter(s|ly)?\b|\bq[1-4]\b", user_message.lower()) is not None
     
     def _process_quarter_convention_answer(self, user_message: str) -> bool:
         """
@@ -304,11 +310,6 @@ Work Orders Board:
     def _is_clarifying_question(content: str, tool_calls_made: List[str]) -> bool:
         """Identify a model response that pauses for one user-supplied detail."""
         return not tool_calls_made and content.strip().endswith("?")
-    
-    def _detect_leadership_update_intent(self, user_message: str) -> bool:
-        """Detect if user is asking for leadership update."""
-        leadership_keywords = ["leadership update", "weekly update", "executive update", "management update"]
-        return any(keyword in user_message.lower() for keyword in leadership_keywords)
     
     def _format_tool_result(self, tool_name: str, result: Dict[str, Any]) -> str:
         """Format tool result for inclusion in response."""
@@ -374,6 +375,17 @@ Work Orders Board:
         
         return output
     
+    @staticmethod
+    def _parse_tool_arguments(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Parse a tool call's JSON arguments; None if they aren't a JSON object."""
+        if not raw:
+            return {}
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return args if isinstance(args, dict) else None
+    
     def _execute_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool call and return the result."""
         if tool_name not in TOOL_FUNCTIONS:
@@ -401,6 +413,10 @@ Work Orders Board:
     
     def process_message(self, user_message: str) -> AgentResponse:
         """Process a user message and return the agent's response."""
+        with use_org_settings(self.org_settings):
+            return self._process_message(user_message)
+    
+    def _process_message(self, user_message: str) -> AgentResponse:
         # Check for leadership update request
         if is_leadership_update_request(user_message):
             self.conversation_history.append(AgentMessage(role="user", content=user_message))
@@ -514,13 +530,17 @@ Work Orders Board:
                     tool_results = []
                     for tool_call in assistant_message.tool_calls:
                         tool_name = tool_call.function.name
-                        try:
-                            tool_args = json.loads(tool_call.function.arguments)
-                        except json.JSONDecodeError:
-                            tool_args = {}
+                        tool_args = self._parse_tool_arguments(tool_call.function.arguments)
                         
                         tool_calls_made.append(tool_name)
-                        result = self._execute_tool_call(tool_name, tool_args)
+                        if tool_args is None:
+                            # Running the tool unfiltered would answer a different question
+                            result = {
+                                "success": False,
+                                "error": "Tool arguments were not valid JSON. Call the tool again with a JSON object of arguments."
+                            }
+                        else:
+                            result = self._execute_tool_call(tool_name, tool_args)
                         
                         # Extract data quality info
                         if result.get("quality_report"):
@@ -574,7 +594,11 @@ Work Orders Board:
                     )
             
             except Exception as e:
-                error_msg = f"Error processing message: {str(e)}"
+                if RateLimitError is not None and isinstance(e, RateLimitError):
+                    error_msg = ("The AI service is briefly rate-limited (Groq free tier). "
+                                 "Please wait about a minute and ask again.")
+                else:
+                    error_msg = f"Error processing message: {str(e)}"
                 self.conversation_history.append(AgentMessage(role="assistant", content=error_msg))
                 return AgentResponse(
                     content=error_msg,
@@ -600,9 +624,9 @@ Work Orders Board:
         self._pending_question = None
 
 
-def create_agent(api_key: str) -> GroqAgent:
+def create_agent(api_key: str, org_settings: Optional[OrgSettings] = None) -> GroqAgent:
     """Factory function to create a GroqAgent instance."""
-    return GroqAgent(api_key)
+    return GroqAgent(api_key, org_settings)
 
 
 def test_tool_calling_reliability(agent: GroqAgent) -> bool:
@@ -615,7 +639,7 @@ def test_tool_calling_reliability(agent: GroqAgent) -> bool:
     test_queries = [
         "What's our total pipeline value?",
         "How many deals do we have in the Negotiations stage?",
-        "What's our pipeline value for the Agriculture sector?"
+        "What's our pipeline value for the Renewables sector?"
     ]
     
     for i, query in enumerate(test_queries):

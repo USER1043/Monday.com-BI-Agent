@@ -102,6 +102,7 @@ This script:
 | DEALS_BOARD_ID | Board ID for Deals board (from setup script) | Unless `DATA_SOURCE=excel` |
 | WORK_ORDERS_BOARD_ID | Board ID for Work Orders board (from setup script) | Unless `DATA_SOURCE=excel` |
 | GROQ_API_KEY | Groq API key for gpt-oss-120b access | Yes |
+| DATA_CACHE_SECONDS | How long Monday.com reads are reused before refetching (default `120`; `0` disables). The sidebar's "Refresh data" button clears it | No |
 
 For local development, create a `.env` file based on `.env.example`. For Streamlit Cloud deployment, add these as secrets in the app settings.
 
@@ -168,7 +169,7 @@ TEST_DATA_SOURCE=monday python -m pytest tests      # against the live Monday.co
 
 ### Sample Questions to Try
 
-- "How's our pipeline looking for Agriculture this quarter?"
+- "How's our pipeline looking for Renewables this quarter?"
 - "What's our weighted pipeline value right now?"
 - "Which work orders are at risk of billing issues?"
 - "Show me deals in the Negotiations stage"
@@ -242,7 +243,6 @@ TEST_DATA_SOURCE=monday python -m pytest tests      # against the live Monday.co
 **With More Time:**
 - Authoritative Deal ID / mapping table to link Deals and Work Orders at record level
 - More robust fuzzy-matching for sector/client name variants
-- Caching to reduce repeated MCP calls within a session
 - Unit tests for individual normalization functions (current tests check tool output end to end)
 - Hardened error handling for MCP connection failures
 - Richer leadership-update formatting (exportable to PDF/slides)

@@ -9,9 +9,11 @@ Per BUILD_BRIEF.md Section 4:
 - get_org_settings() / set_org_setting(key, value) — persistence for fiscal-quarter convention
 """
 
+import contextvars
 import json
 import os
 import statistics
+from contextlib import contextmanager
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime, date
 from dataclasses import dataclass, asdict
@@ -64,15 +66,18 @@ class ToolResult:
 
 
 class OrgSettings:
-    """Simple persistence for organization-level settings like fiscal quarter convention."""
+    """
+    Organization-level settings like fiscal quarter convention.
+    With settings_file=None the settings live in memory only (one store per app session).
+    """
     
-    def __init__(self, settings_file: str = ".org_settings.json"):
+    def __init__(self, settings_file: Optional[str] = ".org_settings.json"):
         self.settings_file = settings_file
         self._settings = self._load_settings()
     
     def _load_settings(self) -> Dict[str, Any]:
         """Load settings from file."""
-        if os.path.exists(self.settings_file):
+        if self.settings_file and os.path.exists(self.settings_file):
             try:
                 with open(self.settings_file, 'r') as f:
                     return json.load(f)
@@ -82,6 +87,8 @@ class OrgSettings:
     
     def _save_settings(self):
         """Save settings to file."""
+        if not self.settings_file:
+            return
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump(self._settings, f, indent=2)
@@ -100,10 +107,30 @@ class OrgSettings:
     def get_all_settings(self) -> Dict[str, Any]:
         """Get all settings."""
         return self._settings.copy()
+    
+    def clear(self):
+        """Remove all settings."""
+        self._settings = {}
+        self._save_settings()
 
 
-# Global org settings instance
+# File-backed default for CLI/scripts; the Streamlit app gives each session its own store
 org_settings = OrgSettings()
+
+# The store get_org_settings/set_org_setting act on (see use_org_settings)
+_active_org_settings: contextvars.ContextVar[OrgSettings] = contextvars.ContextVar(
+    "active_org_settings", default=org_settings
+)
+
+
+@contextmanager
+def use_org_settings(store: OrgSettings):
+    """Route get_org_settings/set_org_setting to `store` for the duration of the block."""
+    token = _active_org_settings.set(store)
+    try:
+        yield store
+    finally:
+        _active_org_settings.reset(token)
 
 
 # Keys holding rupee amounts in normalized records and tool aggregates
@@ -676,7 +703,7 @@ def get_org_settings() -> ToolResult:
         ToolResult with current org settings
     """
     try:
-        settings = org_settings.get_all_settings()
+        settings = _active_org_settings.get().get_all_settings()
         return ToolResult(
             success=True,
             data=settings
@@ -701,7 +728,7 @@ def set_org_setting(key: str, value: Any) -> ToolResult:
         ToolResult confirming the setting was saved
     """
     try:
-        org_settings.set_setting(key, value)
+        _active_org_settings.get().set_setting(key, value)
         return ToolResult(
             success=True,
             data={"key": key, "value": value},

@@ -8,14 +8,18 @@ source-agnostic. Controlled by the DATA_SOURCE environment variable:
 - "auto":   Monday.com MCP when MONDAY_API_TOKEN is set, falling back to the
             Excel snapshots if the MCP read fails (default)
 
+MCP reads are cached for DATA_CACHE_SECONDS (default 120, 0 disables) so a
+question that calls several tools doesn't re-download the boards each time.
+
 Both sources return rows keyed by column title, which the normalizer accepts.
 """
 
+import copy
 import os
 import time
 from datetime import date, datetime
 from functools import lru_cache
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -38,11 +42,27 @@ MCP_RETRY_COOLDOWN_SECONDS = 600
 
 _state: Dict[str, Any] = {"last_source": None, "fallback_reason": None, "mcp_failed_at": None}
 
+# Board key -> (fetched_at, MCP result)
+_mcp_cache: Dict[str, Tuple[float, Any]] = {}
+
 
 def get_mode() -> str:
     """Return the configured mode: 'auto', 'monday' or 'excel'."""
     mode = os.environ.get("DATA_SOURCE", "auto").strip().lower()
     return mode if mode in ("auto", "monday", "excel") else "auto"
+
+
+def get_cache_seconds() -> int:
+    """How long MCP reads are reused; 0 disables caching."""
+    try:
+        return max(0, int(os.environ.get("DATA_CACHE_SECONDS", "120")))
+    except ValueError:
+        return 120
+
+
+def clear_cache():
+    """Drop cached MCP reads so the next read fetches fresh board data."""
+    _mcp_cache.clear()
 
 
 def get_status() -> Dict[str, Any]:
@@ -51,7 +71,20 @@ def get_status() -> Dict[str, Any]:
         "mode": get_mode(),
         "last_source": _state["last_source"],
         "fallback_reason": _state["fallback_reason"],
+        "cache_seconds": get_cache_seconds(),
     }
+
+
+def _cached_mcp_read(key: str, mcp_reader: Callable[[], Any]) -> Any:
+    ttl = get_cache_seconds()
+    cached = _mcp_cache.get(key)
+    if ttl and cached and time.time() - cached[0] < ttl:
+        return copy.deepcopy(cached[1])
+    result = mcp_reader()
+    if ttl:
+        _mcp_cache[key] = (time.time(), result)
+    # Copy so callers can't mutate the cached read.
+    return copy.deepcopy(result)
 
 
 def _row_to_record(row: pd.Series) -> Dict[str, Any]:
@@ -92,7 +125,7 @@ def _excel_schemas() -> Dict[str, List[Dict[str, Any]]]:
     return schemas
 
 
-def _read(mcp_reader: Callable[[], Any], excel_reader: Callable[[], Any]) -> Any:
+def _read(key: str, mcp_reader: Callable[[], Any], excel_reader: Callable[[], Any]) -> Any:
     mode = get_mode()
 
     if mode == "excel":
@@ -109,7 +142,7 @@ def _read(mcp_reader: Callable[[], Any], excel_reader: Callable[[], Any]) -> Any
             return excel_reader()
 
     try:
-        result = mcp_reader()
+        result = _cached_mcp_read(key, mcp_reader)
     except Exception as e:
         if mode == "monday":
             raise
@@ -127,12 +160,12 @@ def _read(mcp_reader: Callable[[], Any], excel_reader: Callable[[], Any]) -> Any
 
 def get_deals_data() -> List[Dict[str, Any]]:
     """Raw Deals rows from the active source."""
-    return _read(sync_get_deals_data, lambda: _excel_rows("deals"))
+    return _read("deals", sync_get_deals_data, lambda: _excel_rows("deals"))
 
 
 def get_work_orders_data() -> List[Dict[str, Any]]:
     """Raw Work Orders rows from the active source."""
-    return _read(sync_get_work_orders_data, lambda: _excel_rows("work_orders"))
+    return _read("work_orders", sync_get_work_orders_data, lambda: _excel_rows("work_orders"))
 
 
 def get_board_schemas() -> Dict[str, List[Dict[str, Any]]]:
@@ -145,4 +178,4 @@ def get_board_schemas() -> Dict[str, List[Dict[str, Any]]]:
             raise RuntimeError("Unable to connect to the Monday MCP server")
         return schemas
 
-    return _read(mcp_schemas, _excel_schemas)
+    return _read("schemas", mcp_schemas, _excel_schemas)
